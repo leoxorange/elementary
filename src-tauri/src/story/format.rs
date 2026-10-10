@@ -31,6 +31,8 @@
 //! | `LOCS` | no       | `varuint` count, then location records: `ref` id, `text` name, `text` region, `text` description, `ref` symbol, `int` x, `int` y (location map position) |
 //! | `ROUT` | no       | `varuint` count, then two-way roads between locations: `ref` location id, `ref` location id |
 //! | `EVNT` | no       | `varuint` count, then event records: `ref` id, `text` name, `text` description, `ref` symbol |
+//! | `SKIL` | no       | `varuint` count, then skill records (see `encoder::write_skill`). Absent means the built-in catalog. |
+//! | `OCCU` | no       | `varuint` count, then occupation records (see `encoder::write_occupation`). Absent means the built-in catalog. |
 //! | `TRKS` | no       | `varuint` count, then tracks: `ref` id, `ref` name, `ref` file extension. The audio is the package entry `music/<id>.<extension>`. |
 //! | `NODE` | yes      | `varuint` count, then node records (below) |
 //! | `LINK` | yes      | `varuint` count, then links: `ref` from node, `ref` from port, `ref` to node |
@@ -98,6 +100,8 @@ pub mod tag {
     pub const MONSTERS: &[u8; 4] = b"MONS";
     pub const LOCATIONS: &[u8; 4] = b"LOCS";
     pub const EVENTS: &[u8; 4] = b"EVNT";
+    pub const SKILLS: &[u8; 4] = b"SKIL";
+    pub const OCCUPATIONS: &[u8; 4] = b"OCCU";
     pub const ROUTES: &[u8; 4] = b"ROUT";
     pub const TRACKS: &[u8; 4] = b"TRKS";
     pub const NODES: &[u8; 4] = b"NODE";

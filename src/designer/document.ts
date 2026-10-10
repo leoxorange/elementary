@@ -37,7 +37,10 @@ import type {
   StoryLocation,
   StoryMonster,
   StoryNode,
+  StoryOccupation,
+  StorySkill,
 } from "../model/types";
+import { builtInOccupations, builtInSkills, catalogOf, type SkillCatalog } from "../model/skills";
 import { validate, type StoryIssue } from "../model/validator";
 import { characterTemplate, isPlaceable, makeKind, monsterTemplate } from "./nodeTypes";
 
@@ -51,6 +54,8 @@ export type Selection =
   | { type: "monster"; id: string }
   | { type: "location"; id: string }
   | { type: "event"; id: string }
+  | { type: "skill"; id: string }
+  | { type: "occupation"; id: string }
   /// A road on the location map.
   | { type: "route"; route: LocationRoute }
   | null;
@@ -104,6 +109,8 @@ export class StoryDocument {
       events: [],
       routes: [],
       tracks: [],
+      skills: null,
+      occupations: null,
     };
     const entrance: StoryNode = {
       id: makeId(),
@@ -183,7 +190,7 @@ export class StoryDocument {
     return new Set();
   }
 
-  selectedId(type: "character" | "item" | "monster" | "location" | "event"): string | undefined {
+  selectedId(type: "character" | "item" | "monster" | "location" | "event" | "skill" | "occupation"): string | undefined {
     const s = this.selection;
     return s?.type === type ? s.id : undefined;
   }
@@ -364,6 +371,10 @@ export class StoryDocument {
         return this.deleteLocation(s.id);
       case "event":
         return this.deleteEvent(s.id);
+      case "skill":
+        return this.deleteSkill(s.id);
+      case "occupation":
+        return this.deleteOccupation(s.id);
       case "route":
         return this.disconnectRoute(s.route);
     }
@@ -738,6 +749,187 @@ export class StoryDocument {
         (n.kind.eventId === eventId ||
           (n.kind.occurrence === "perhaps" && n.kind.trigger.mode === "priorEvent" && n.kind.trigger.priorEventId === eventId)),
     );
+  }
+
+  // MARK: Skill sheet
+
+  /// The story's skills and occupations: its own sheets, or the built-in ones.
+  get catalog(): SkillCatalog {
+    return catalogOf(this.story);
+  }
+
+  /// Stories start out on the built-in catalog. The first change to it copies the catalog into the story, so
+  /// built-in skills can be edited and deleted like any other.
+  private ownSkills(story: Draft<Story>): Draft<StorySkill>[] {
+    story.skills ??= builtInSkills();
+    return story.skills;
+  }
+
+  private ownOccupations(story: Draft<Story>): Draft<StoryOccupation>[] {
+    story.occupations ??= builtInOccupations();
+    return story.occupations;
+  }
+
+  /// Adds a skill: an ordinary one, or an ability that starts out as a simple attack spell to adjust.
+  addSkill(kind: "skill" | "ability" = "skill"): string {
+    const skill: StorySkill = {
+      id: makeId(),
+      name: localizedText(kind === "ability" ? "New ability" : "New skill", this.language),
+      detail: [],
+      symbol: kind === "ability" ? "flame.fill" : "sparkles",
+      group: kind === "ability" ? "magic" : "other",
+      base: { type: "fixed", value: kind === "ability" ? 0 : 10 },
+      takesSpecialty: false,
+      isUncommon: kind === "ability",
+      atCreation: true,
+      isWealth: false,
+      combat:
+        kind === "ability"
+          ? {
+              type: "ability",
+              ability: {
+                effect: "damage",
+                amount: { count: 2, sides: 6, bonus: 0 },
+                addsDamageBonus: false,
+                piercesArmor: true,
+                dodgeable: true,
+                target: "enemy",
+                cost: { mp: 4, hp: 0, stamina: 0, sanity: 0 },
+              },
+            }
+          : { type: "none" },
+    };
+    this.edit((story) => {
+      this.ownSkills(story).push(skill);
+    });
+    this.selection = { type: "skill", id: skill.id };
+    return skill.id;
+  }
+
+  updateSkill(id: string, change: (skill: Draft<StorySkill>) => void) {
+    this.edit((story) => {
+      const skill = this.ownSkills(story).find((s) => s.id === id);
+      if (skill) change(skill);
+      // Only one skill can be the measure of wealth.
+      if (skill?.isWealth) for (const other of story.skills!) if (other.id !== id) other.isWealth = false;
+    }, true);
+  }
+
+  duplicateSkill(id: string) {
+    const original = this.catalog.skill(id);
+    if (!original) return;
+    const copy: StorySkill = { ...structuredClone(original), id: makeId(), isWealth: false };
+    this.edit((story) => {
+      const skills = this.ownSkills(story);
+      skills.splice(skills.findIndex((s) => s.id === id) + 1, 0, copy);
+    });
+    this.selection = { type: "skill", id: copy.id };
+  }
+
+  /// Removes a skill from the sheet, from every character's skills and every occupation, and from the weapons that
+  /// used it. Checks that rolled it are left pointing at nothing, which validation points out.
+  deleteSkill(id: string) {
+    this.edit((story) => {
+      const skills = this.ownSkills(story);
+      skills.splice(0, skills.length, ...skills.filter((s) => s.id !== id));
+      for (const character of story.characters) character.skills = character.skills.filter((s) => s.skillId !== id);
+      for (const item of story.items) if (item.skillId === id) item.skillId = "";
+      for (const occupation of this.ownOccupations(story)) {
+        occupation.slots = occupation.slots
+          .map((slot) => (slot.type === "oneOf" ? { ...slot, skillIds: slot.skillIds.filter((s) => s !== id) } : slot))
+          .filter((slot) => !(slot.type === "skill" && slot.skillId === id) && !(slot.type === "oneOf" && slot.skillIds.length === 0));
+      }
+    });
+    if (this.selectedId("skill") === id) this.selection = null;
+  }
+
+  moveSkill(id: string, offset: number) {
+    this.edit((story) => {
+      const skills = this.ownSkills(story);
+      const from = skills.findIndex((s) => s.id === id);
+      const to = from + offset;
+      if (from < 0 || to < 0 || to >= skills.length) return;
+      const [skill] = skills.splice(from, 1);
+      skills.splice(to, 0, skill);
+    });
+  }
+
+  /// Goes back to the built-in skills. Story-made skills disappear, and whatever used them is flagged by validation.
+  restoreBuiltInSkills() {
+    this.edit((story) => {
+      story.skills = null;
+    });
+    if (this.selection?.type === "skill") this.selection = null;
+  }
+
+  /// Where a skill is used: checks that roll it, weapons that use it, characters who have it, and occupations that offer it.
+  skillUsage(id: string): { checks: StoryNode[]; items: Item[]; characters: StoryCharacter[]; occupations: StoryOccupation[] } {
+    return {
+      checks: this.story.nodes.filter((n) => n.kind.type === "check" && n.kind.target.type === "skill" && n.kind.target.skillId === id),
+      items: this.story.items.filter((i) => i.skillId === id),
+      characters: this.story.characters.filter((c) => c.skills.some((s) => s.skillId === id)),
+      occupations: this.catalog.occupations.filter((o) =>
+        o.slots.some((slot) => (slot.type === "skill" && slot.skillId === id) || (slot.type === "oneOf" && slot.skillIds.includes(id))),
+      ),
+    };
+  }
+
+  // MARK: Occupation sheet
+
+  addOccupation(): string {
+    const occupation: StoryOccupation = {
+      id: makeId(),
+      name: localizedText("New occupation", this.language),
+      detail: [],
+      symbol: "briefcase",
+      wealth: [9, 30],
+      points: [{ characteristics: ["education"], multiplier: 4 }],
+      slots: [{ type: "any", count: 4 }],
+    };
+    this.edit((story) => {
+      this.ownOccupations(story).push(occupation);
+    });
+    this.selection = { type: "occupation", id: occupation.id };
+    return occupation.id;
+  }
+
+  updateOccupation(id: string, change: (occupation: Draft<StoryOccupation>) => void) {
+    this.edit((story) => {
+      const occupation = this.ownOccupations(story).find((o) => o.id === id);
+      if (occupation) change(occupation);
+    }, true);
+  }
+
+  duplicateOccupation(id: string) {
+    const original = this.catalog.occupation(id);
+    if (!original) return;
+    const copy: StoryOccupation = { ...structuredClone(original), id: makeId() };
+    this.edit((story) => {
+      const occupations = this.ownOccupations(story);
+      occupations.splice(occupations.findIndex((o) => o.id === id) + 1, 0, copy);
+    });
+    this.selection = { type: "occupation", id: copy.id };
+  }
+
+  /// Removes an occupation. Characters who had it keep their skills but have no occupation.
+  deleteOccupation(id: string) {
+    this.edit((story) => {
+      const occupations = this.ownOccupations(story);
+      occupations.splice(0, occupations.length, ...occupations.filter((o) => o.id !== id));
+      for (const character of story.characters) if (character.occupationId === id) character.occupationId = "";
+    });
+    if (this.selectedId("occupation") === id) this.selection = null;
+  }
+
+  restoreBuiltInOccupations() {
+    this.edit((story) => {
+      story.occupations = null;
+    });
+    if (this.selection?.type === "occupation") this.selection = null;
+  }
+
+  charactersWithOccupation(id: string): StoryCharacter[] {
+    return this.story.characters.filter((c) => c.occupationId === id);
   }
 
   // MARK: Music

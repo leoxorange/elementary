@@ -12,8 +12,15 @@ import type { Story, StorySource, StoryText } from "../model/types";
 import { isPlayable } from "../model/validator";
 import { useSettings } from "../settings";
 
-export function Welcome({ onStart, onOpenDesigner }: { onStart: (game: GameState) => void; onOpenDesigner: () => void }) {
-  const [page, setPage] = useState<"menu" | "newGame">("menu");
+export function Welcome({ initialPage = "menu", onStart, onNewGame, onOpenDesigner }: {
+  initialPage?: "menu" | "newGame";
+  /// Continues the saved game.
+  onStart: (game: GameState) => void;
+  /// Goes on to choosing a hero for the chosen story.
+  onNewGame: (story: Story, source: StorySource) => void;
+  onOpenDesigner: () => void;
+}) {
+  const [page, setPage] = useState<"menu" | "newGame">(initialPage);
   const [save, setSave] = useState<SaveSummary | null>(null);
   const [showsSettings, setShowsSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +69,7 @@ export function Welcome({ onStart, onOpenDesigner }: { onStart: (game: GameState
           </div>
         </div>
       ) : (
-        <NewGame hasSave={save !== null} onStart={onStart} onBack={() => setPage("menu")} />
+        <NewGame hasSave={save !== null} onChoose={onNewGame} onBack={() => setPage("menu")} />
       )}
 
       {page === "menu" && (
@@ -142,8 +149,8 @@ function makeEntry(story: Story, source: StoryEntry["source"], playSource: Story
   return { story, source, playSource, isPlayable: isPlayable(story) };
 }
 
-/// Lists the built-in scripts and any the player opens, then starts the chosen one.
-function NewGame({ hasSave, onStart, onBack }: { hasSave: boolean; onStart: (game: GameState) => void; onBack: () => void }) {
+/// Lists the built-in scripts and any the player opens, then moves on with the chosen one.
+function NewGame({ hasSave, onChoose, onBack }: { hasSave: boolean; onChoose: (story: Story, source: StorySource) => void; onBack: () => void }) {
   const [entries, setEntries] = useState<StoryEntry[]>([]);
   const [selection, setSelection] = useState<string | null>(null);
   const [confirmsOverwrite, setConfirmsOverwrite] = useState(false);
@@ -163,13 +170,8 @@ function NewGame({ hasSave, onStart, onBack }: { hasSave: boolean; onStart: (gam
   const selected = entries.find((e) => entryId(e) === selection);
 
   const start = useCallback(() => {
-    if (!selected) return;
-    try {
-      onStart(GameState.start(selected.story, selected.playSource));
-    } catch (e) {
-      setError({ title: t("Couldn't start story"), message: errorMessage(e) });
-    }
-  }, [selected, onStart]);
+    if (selected) onChoose(selected.story, selected.playSource);
+  }, [selected, onChoose]);
 
   const begin = () => (hasSave ? setConfirmsOverwrite(true) : start());
 

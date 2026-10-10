@@ -1,8 +1,9 @@
 // Display names for the rules types. The rules carry no interface strings, so the names are added here.
 
 import { t } from "../i18n";
-import { SuccessLevel } from "./rules";
-import { skillDefinition } from "./skills";
+import { ABBREVIATIONS, SuccessLevel } from "./rules";
+import { skillsInGroup, type SkillCatalog } from "./skills";
+import { isBlank, resolve } from "./storyText";
 import type {
   Characteristic,
   CheckDifficulty,
@@ -12,6 +13,9 @@ import type {
   ItemCategory,
   Occurrence,
   Outcome,
+  PointTerm,
+  SkillGroup,
+  StoryOccupation,
   TriggerMode,
 } from "./types";
 
@@ -53,136 +57,36 @@ export function successLevelName(level: SuccessLevel): string {
   }
 }
 
-const SKILL_NAMES: Record<string, string> = {
-  accounting: "Accounting",
-  anthropology: "Anthropology",
-  appraise: "Appraise",
-  archaeology: "Archaeology",
-  artCraft: "Art/Craft",
-  charm: "Charm",
-  climb: "Climb",
-  computerUse: "Computer Use",
-  creditRating: "Credit Rating",
-  mythos: "Mythos",
-  disguise: "Disguise",
-  dodge: "Dodge",
-  driveAuto: "Drive Auto",
-  electricalRepair: "Electrical Repair",
-  electronics: "Electronics",
-  fastTalk: "Fast Talk",
-  fightingBrawl: "Fighting (Brawl)",
-  fightingAxe: "Fighting (Axe)",
-  fightingChainsaw: "Fighting (Chainsaw)",
-  fightingFlail: "Fighting (Flail)",
-  fightingGarrote: "Fighting (Garrote)",
-  fightingSpear: "Fighting (Spear)",
-  fightingSword: "Fighting (Sword)",
-  fightingWhip: "Fighting (Whip)",
-  firearmsHandgun: "Firearms (Handgun)",
-  firearmsRifle: "Firearms (Rifle/Shotgun)",
-  firearmsBow: "Firearms (Bow)",
-  firearmsFlamethrower: "Firearms (Flamethrower)",
-  firearmsHeavyWeapons: "Firearms (Heavy Weapons)",
-  firearmsMachineGun: "Firearms (Machine Gun)",
-  firearmsSubmachineGun: "Firearms (Submachine Gun)",
-  firstAid: "First Aid",
-  history: "History",
-  intimidate: "Intimidate",
-  jump: "Jump",
-  languageOther: "Language (Other)",
-  languageOwn: "Language (Own)",
-  law: "Law",
-  libraryUse: "Library Use",
-  listen: "Listen",
-  locksmith: "Locksmith",
-  mechanicalRepair: "Mechanical Repair",
-  medicine: "Medicine",
-  naturalWorld: "Natural World",
-  navigate: "Navigate",
-  occult: "Occult",
-  operateHeavyMachinery: "Operate Heavy Machinery",
-  persuade: "Persuade",
-  pilot: "Pilot",
-  psychoanalysis: "Psychoanalysis",
-  psychology: "Psychology",
-  ride: "Ride",
-  science: "Science",
-  sleightOfHand: "Sleight of Hand",
-  spotHidden: "Spot Hidden",
-  stealth: "Stealth",
-  survival: "Survival",
-  swim: "Swim",
-  throw: "Throw",
-  track: "Track",
-  animalHandling: "Animal Handling",
-  artillery: "Artillery",
-  demolitions: "Demolitions",
-  diving: "Diving",
-  hypnosis: "Hypnosis",
-  lore: "Lore",
-  readLips: "Read Lips",
-};
-
-export function skillName(id: string): string {
-  const name = SKILL_NAMES[id];
-  return name ? t(name) : id;
+/// A skill's name from the story's sheet, or its ID when the sheet has no such skill.
+export function skillName(catalog: SkillCatalog, id: string, language: string): string {
+  const skill = catalog.skill(id);
+  return skill ? resolve(skill.name, language) || id : id;
 }
 
-/// Suggested specialties named by occupations are English keys, translated for display and for new skill entries.
-export function specialtyName(key: string): string {
-  return t(key);
+export function occupationName(catalog: SkillCatalog, id: string, language: string): string {
+  const occupation = catalog.occupation(id);
+  return occupation ? resolve(occupation.name, language) || id : id;
 }
 
-const OCCUPATION_NAMES: Record<string, string> = {
-  accountant: "Accountant",
-  antiquarian: "Antiquarian",
-  archaeologist: "Archaeologist",
-  artist: "Artist",
-  athlete: "Athlete",
-  author: "Author",
-  clergy: "Clergy",
-  criminal: "Criminal",
-  dilettante: "Dilettante",
-  doctorOfMedicine: "Doctor of Medicine",
-  drifter: "Drifter",
-  engineer: "Engineer",
-  entertainer: "Entertainer",
-  explorer: "Explorer",
-  farmer: "Farmer",
-  gentry: "Gentleman/Lady",
-  hunter: "Big Game Hunter",
-  journalist: "Journalist",
-  lawyer: "Lawyer",
-  librarian: "Librarian",
-  militaryOfficer: "Military Officer",
-  missionary: "Missionary",
-  musician: "Musician",
-  nurse: "Nurse",
-  occultist: "Occultist",
-  parapsychologist: "Parapsychologist",
-  photographer: "Photographer",
-  policeDetective: "Police Detective",
-  policeOfficer: "Police Officer",
-  privateInvestigator: "Private Investigator",
-  professor: "Professor",
-  psychologist: "Psychologist",
-  sailor: "Sailor",
-  scientist: "Scientist",
-  soldier: "Soldier",
-  student: "Student",
-  tribeMember: "Tribe Member",
-  zealot: "Zealot",
-};
-
-export function occupationName(id: string): string {
-  const name = OCCUPATION_NAMES[id];
-  return name ? t(name) : id;
+export function groupName(group: SkillGroup): string {
+  return t(
+    {
+      combat: "Combat",
+      interpersonal: "Interpersonal",
+      knowledge: "Knowledge",
+      perception: "Perception",
+      physical: "Physical",
+      technical: "Technical",
+      magic: "Magic",
+      other: "Other",
+    }[group],
+  );
 }
 
 /// The characteristic's or skill's name, e.g. Dexterity or Spot Hidden.
-export function checkTargetName(target: CheckTarget): string {
+export function checkTargetName(catalog: SkillCatalog, target: CheckTarget, language: string): string {
   if (target.type === "characteristic") return characteristicName(target.characteristic);
-  return skillDefinition(target.skillId) ? skillName(target.skillId) : target.skillId;
+  return skillName(catalog, target.skillId, language);
 }
 
 /// The times of day, in order.
@@ -234,4 +138,36 @@ export const CATEGORY_SYMBOLS: Record<ItemCategory, string> = {
 
 export function outcomeName(outcome: Outcome): string {
   return t({ triumph: "Triumph", neutral: "Neutral", tragedy: "Tragedy" }[outcome]);
+}
+
+// MARK: Occupations
+
+/// An occupation's skill point formula, e.g. “EDU × 2 + DEX/STR × 2”.
+export function formulaText(terms: PointTerm[]): string {
+  if (terms.length === 0) return "0";
+  return terms.map((term) => `${term.characteristics.map((c) => ABBREVIATIONS[c]).join("/") || "?"} × ${term.multiplier}`).join(" + ");
+}
+
+/// An occupation's skill list, e.g. “Accounting, Law, 1 Interpersonal (Charm, Fast Talk, …), 2 other skills of your choice”.
+export function occupationSkillsText(catalog: SkillCatalog, occupation: StoryOccupation, language: string): string {
+  return occupation.slots
+    .map((slot) => {
+      switch (slot.type) {
+        case "skill": {
+          const name = skillName(catalog, slot.skillId, language);
+          return isBlank(slot.specialty) ? name : `${name} (${resolve(slot.specialty, language)})`;
+        }
+        case "oneOf":
+          return slot.skillIds.map((id) => skillName(catalog, id, language)).join(t(" or "));
+        case "group": {
+          const members = skillsInGroup(catalog, slot.group).filter((s) => !s.isUncommon);
+          return members.length > 0 && members.length <= 6
+            ? t("%lld %@ (%@)", slot.count, groupName(slot.group), members.map((s) => resolve(s.name, language)).join(t(", ")))
+            : t("%lld %@", slot.count, groupName(slot.group));
+        }
+        case "any":
+          return t("%lld other skills of your choice", slot.count);
+      }
+    })
+    .join(t(", "));
 }

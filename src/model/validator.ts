@@ -3,14 +3,15 @@
 import { hitPoints } from "./rules";
 import {
   allowsOccupationPoints,
+  catalogOf,
   characterSkillValue,
   entryValue,
-  occupation,
   occupationPointBudget,
   occupationPointsSpent,
   personalPointBudget,
   personalPointsSpent,
-  skillDefinition,
+  wealthSkill,
+  type SkillCatalog,
 } from "./skills";
 import {
   arrivingLocations,
@@ -72,8 +73,8 @@ export type IssueKind =
   | { type: "notAnOccupationSkill"; skillId: string }
   /// A skill above 99, which isn't allowed at character creation.
   | { type: "skillTooHigh"; skillId: string }
-  /// Points in Mythos, which can't be bought at creation.
-  | { type: "mythosAtCreation" }
+  /// Points in a skill that can't be bought at creation, such as Cthulhu Mythos.
+  | { type: "notAtCreation"; skillId: string }
   /// The hero's Credit Rating is outside their occupation's range.
   | { type: "creditRatingOutOfRange"; range: [number, number] }
   /// A node that can kill the hero has nothing wired to its Death output.
@@ -83,6 +84,12 @@ export type IssueKind =
   /// A choice option travels to a location with no road from where the hero is.
   | { type: "moveNotConnected"; optionId: string; from: string }
   | { type: "noEvent" }
+  /// A weapon on the item sheet uses a skill that isn't a weapon skill, so nobody can attack with it.
+  | { type: "notAWeaponSkill"; itemId: string }
+  /// An ability with no dice, so it can't do anything.
+  | { type: "abilityWithoutDice"; skillId: string }
+  /// An occupation offers a skill that isn't on the skill sheet.
+  | { type: "occupationUnknownSkill"; occupationId: string; skillId: string }
   | { type: "noPriorEvent" }
   | { type: "noConditions" }
   /// A time trigger with no times of day, or whose last day is before its first, never fires.
@@ -105,6 +112,9 @@ export function validate(story: Story): StoryIssue[] {
   const issues: StoryIssue[] = [];
   const error = (kind: IssueKind, nodeId?: string) => issues.push({ severity: "error", nodeId, kind });
   const warning = (kind: IssueKind, nodeId?: string) => issues.push({ severity: "warning", nodeId, kind });
+
+  const catalog = catalogOf(story);
+  sheetIssues(story, catalog, error, warning);
 
   const entrances = story.nodes.filter((n) => n.kind.type === "entrance");
   if (entrances.length === 0) error({ type: "noEntrance" });
@@ -150,7 +160,7 @@ export function validate(story: Story): StoryIssue[] {
           const carried = hero.itemIds.map((id) => findItem(story, id)).filter((i): i is Item => !!i);
           const load = carried.reduce((sum, i) => sum + Math.max(0, i.weight), 0);
           if (hero.carryCapacity > 0 && load > hero.carryCapacity) warning({ type: "heroOverloaded" }, node.id);
-          for (const issue of skillIssues(hero)) warning(issue, node.id);
+          for (const issue of skillIssues(catalog, hero)) warning(issue, node.id);
           for (const item of carried.filter((i) => i.category === "weapon")) {
             if (item.skillId === "" || !hero.skills.some((s) => s.skillId === item.skillId)) {
               warning({ type: "cannotUseWeapon", itemId: item.id }, node.id);
@@ -195,7 +205,7 @@ export function validate(story: Story): StoryIssue[] {
         else if (!startNode(story, kind.targetChapterId)) error({ type: "targetHasNoStart" }, node.id);
         break;
       case "check":
-        if (kind.target.type === "skill" && !skillDefinition(kind.target.skillId)) {
+        if (kind.target.type === "skill" && !catalog.skill(kind.target.skillId)) {
           error({ type: "unknownSkill", skillId: kind.target.skillId }, node.id);
         }
         break;
@@ -239,12 +249,31 @@ export function validate(story: Story): StoryIssue[] {
   return issues;
 }
 
+/// Problems on the skill, occupation, and item sheets themselves.
+function sheetIssues(story: Story, catalog: SkillCatalog, error: (kind: IssueKind) => void, warning: (kind: IssueKind) => void) {
+  for (const item of story.items) {
+    const combat = catalog.skill(item.skillId)?.combat;
+    if (item.category === "weapon" && item.skillId !== "" && combat?.type !== "weapon") warning({ type: "notAWeaponSkill", itemId: item.id });
+  }
+  for (const skill of catalog.skills) {
+    if (skill.combat.type === "ability" && (skill.combat.ability.amount.count < 1 || skill.combat.ability.amount.sides < 1)) {
+      error({ type: "abilityWithoutDice", skillId: skill.id });
+    }
+  }
+  for (const occupation of catalog.occupations) {
+    const named = occupation.slots.flatMap((slot) => (slot.type === "skill" ? [slot.skillId] : slot.type === "oneOf" ? slot.skillIds : []));
+    const missing = named.find((id) => !catalog.skill(id));
+    if (missing !== undefined) warning({ type: "occupationUnknownSkill", occupationId: occupation.id, skillId: missing });
+  }
+}
+
 /// Character-creation checks for the hero's skills.
-function skillIssues(hero: StoryCharacter): IssueKind[] {
+export function skillIssues(catalog: SkillCatalog, hero: StoryCharacter): IssueKind[] {
   const issues: IssueKind[] = [];
-  const job = occupation(hero.occupationId);
-  if (occupationPointsSpent(hero) > occupationPointBudget(hero)) {
-    issues.push({ type: "occupationPointsOverspent", spent: occupationPointsSpent(hero), budget: occupationPointBudget(hero) });
+  const job = catalog.occupation(hero.occupationId);
+  const budget = occupationPointBudget(catalog, hero);
+  if (occupationPointsSpent(hero) > budget) {
+    issues.push({ type: "occupationPointsOverspent", spent: occupationPointsSpent(hero), budget });
   }
   if (personalPointsSpent(hero) > personalPointBudget(hero)) {
     issues.push({ type: "personalPointsOverspent", spent: personalPointsSpent(hero), budget: personalPointBudget(hero) });
@@ -252,21 +281,25 @@ function skillIssues(hero: StoryCharacter): IssueKind[] {
   const reported = new Set<string>();
   const once = (key: string) => !reported.has(key) && (reported.add(key), true);
   for (const entry of hero.skills) {
-    if (!skillDefinition(entry.skillId)) {
+    const skill = catalog.skill(entry.skillId);
+    if (!skill) {
       if (once("unknown" + entry.skillId)) issues.push({ type: "unknownSkill", skillId: entry.skillId });
       continue;
     }
-    if (job && entry.occupationPoints > 0 && !allowsOccupationPoints(job, entry.skillId) && once("occ" + entry.skillId)) {
+    if (job && entry.occupationPoints > 0 && !allowsOccupationPoints(catalog, job, entry.skillId) && once("occ" + entry.skillId)) {
       issues.push({ type: "notAnOccupationSkill", skillId: entry.skillId });
     }
-    if (entryValue(entry, hero.characteristics) > 99 && once("high" + entry.skillId)) {
+    if (entryValue(catalog, entry, hero.characteristics) > 99 && once("high" + entry.skillId)) {
       issues.push({ type: "skillTooHigh", skillId: entry.skillId });
     }
-    if (entry.skillId === "mythos" && entry.occupationPoints + entry.personalPoints > 0) issues.push({ type: "mythosAtCreation" });
+    if (!skill.atCreation && entry.occupationPoints + entry.personalPoints > 0 && once("creation" + entry.skillId)) {
+      issues.push({ type: "notAtCreation", skillId: entry.skillId });
+    }
   }
-  if (job) {
-    const credit = characterSkillValue(hero, "creditRating");
-    if (credit < job.creditRating[0] || credit > job.creditRating[1]) issues.push({ type: "creditRatingOutOfRange", range: job.creditRating });
+  const wealth = wealthSkill(catalog);
+  if (job && wealth) {
+    const value = characterSkillValue(catalog, hero, wealth.id);
+    if (value < job.wealth[0] || value > job.wealth[1]) issues.push({ type: "creditRatingOutOfRange", range: job.wealth });
   }
   return issues;
 }

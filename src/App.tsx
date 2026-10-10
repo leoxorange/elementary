@@ -6,14 +6,18 @@ import { DesignerHome } from "./designer/DesignerHome";
 import { DesignerView } from "./designer/DesignerView";
 import type { StoryDocument } from "./designer/document";
 import { GameState } from "./game/gameState";
+import type { Story, StorySource } from "./model/types";
 import { GameView } from "./screens/game/GameView";
+import { HeroCreation } from "./screens/HeroCreation";
 import { Welcome } from "./screens/Welcome";
 import { SettingsProvider } from "./settings";
 
 type Screen =
-  | { type: "welcome" }
+  | { type: "welcome"; page?: "newGame" }
   | { type: "designerHome" }
   | { type: "designer"; document: StoryDocument }
+  /// Choosing or creating the hero for a new game. Play-tests have no source and return to the designer.
+  | { type: "hero"; story: Story; source: StorySource | null; returnTo: StoryDocument | null }
   /// A game, and the designer document to return to if it's a play-test.
   | { type: "game"; game: GameState; returnTo: StoryDocument | null };
 
@@ -33,7 +37,9 @@ function Root() {
     case "welcome":
       content = (
         <Welcome
+          initialPage={screen.page}
           onStart={(game) => setScreen({ type: "game", game, returnTo: null })}
+          onNewGame={(story, source) => setScreen({ type: "hero", story, source, returnTo: null })}
           onOpenDesigner={() => setScreen({ type: "designerHome" })}
         />
       );
@@ -48,10 +54,22 @@ function Root() {
         <DesignerView
           document={screen.document}
           onClose={() => setScreen({ type: "designerHome" })}
-          onPlaytest={(game) => setScreen({ type: "game", game, returnTo: screen.document })}
+          onPlaytest={(story) => setScreen({ type: "hero", story, source: null, returnTo: screen.document })}
         />
       );
       break;
+    case "hero": {
+      const { story, source, returnTo } = screen;
+      content = (
+        <HeroCreation
+          story={story}
+          source={source}
+          onStart={(game) => setScreen({ type: "game", game, returnTo })}
+          onBack={() => setScreen(returnTo ? { type: "designer", document: returnTo } : { type: "welcome", page: "newGame" })}
+        />
+      );
+      break;
+    }
     case "game": {
       const { game, returnTo } = screen;
       content = (
@@ -60,13 +78,8 @@ function Root() {
           key={game.id}
           game={game}
           onMainMenu={() => setScreen(returnTo ? { type: "designer", document: returnTo } : { type: "welcome" })}
-          onPlayAgain={() => {
-            try {
-              setScreen({ type: "game", game: GameState.start(game.story, game.source), returnTo });
-            } catch {
-              // The story was playable a moment ago, so this doesn't happen; staying put is the safe fallback.
-            }
-          }}
+          // Playing again starts over from choosing a hero, so the next run can be someone else.
+          onPlayAgain={() => setScreen({ type: "hero", story: game.story, source: game.source, returnTo })}
         />
       );
       break;

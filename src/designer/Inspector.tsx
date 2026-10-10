@@ -29,13 +29,15 @@ import {
   checkTargetName,
   comparisonName,
   difficultyName,
+  formulaText,
+  groupName,
   occupationName,
+  occupationSkillsText,
   occurrenceName,
   outcomeName,
   PHASE_KEYS,
   phaseName,
   skillName,
-  specialtyName,
   timeWindowSummary,
   triggerModeName,
 } from "../model/names";
@@ -56,20 +58,19 @@ import {
 } from "../model/rules";
 import {
   allowsOccupationPoints,
-  baseValue,
+  characterSkillValue,
   CUSTOM_POINTS,
   entryValue,
-  occupation,
+  formulaPoints,
   occupationPointBudget,
   occupationPointsSpent,
-  OCCUPATIONS,
   personalPointBudget,
   personalPointsSpent,
-  skillDefinition,
-  SKILLS,
+  SKILL_GROUPS,
+  skillBase,
   valueForTarget,
-  type Occupation,
-  type SkillPointFormula,
+  wealthSkill,
+  type SkillCatalog,
 } from "../model/skills";
 import {
   entrance,
@@ -92,7 +93,7 @@ import {
   startNode,
   storyTitle,
 } from "../model/story";
-import { isBlank, localizedText, resolve, translation, withTranslation } from "../model/storyText";
+import { isBlank, resolve, translation, withTranslation } from "../model/storyText";
 import type {
   Characteristic,
   CharacteristicCondition,
@@ -104,9 +105,14 @@ import type {
   MusicTrack,
   NodeKind,
   NodeType,
+  OccupationSlot,
   Outcome,
+  SkillAbility,
+  SkillGroup,
   Story,
   StoryCharacter,
+  StoryOccupation,
+  StorySkill,
   StoryLocation,
   StoryNode,
   StoryText,
@@ -140,6 +146,10 @@ export function Inspector({ document, preview }: { document: StoryDocument; prev
     content = <LocationEditor key={selection.id} document={document} locationId={selection.id} />;
   } else if (selection?.type === "event" && findEvent(story, selection.id)) {
     content = <EventEditor key={selection.id} document={document} eventId={selection.id} />;
+  } else if (selection?.type === "skill" && document.catalog.skill(selection.id)) {
+    content = <SkillEditor key={selection.id} document={document} skillId={selection.id} />;
+  } else if (selection?.type === "occupation" && document.catalog.occupation(selection.id)) {
+    content = <OccupationEditor key={selection.id} document={document} occupationId={selection.id} />;
   } else if (selection?.type === "route") {
     content = <RouteView document={document} route={selection.route} />;
   } else {
@@ -818,14 +828,22 @@ function CheckEditor({ kind, update, document }: { kind: KindOf<"check">; update
           { value: true, label: t("Skill") },
         ]}
         onChange={(skill) =>
-          update((k) => void (k.target = skill ? { type: "skill", skillId: "spotHidden" } : { type: "characteristic", characteristic: "dexterity" }))
+          update(
+            (k) =>
+              void (k.target = skill
+                ? { type: "skill", skillId: document.catalog.skill("spotHidden") ? "spotHidden" : (document.catalog.skills[0]?.id ?? "") }
+                : { type: "characteristic", characteristic: "dexterity" }),
+          )
         }
       />
       {kind.target.type === "skill" ? (
         <SelectRow
           title={t("Skill")}
           value={kind.target.skillId}
-          options={SKILLS.map((s) => ({ value: s.id, label: skillName(s.id) }))}
+          options={[
+            ...(document.catalog.skill(kind.target.skillId) ? [] : [{ value: kind.target.skillId, label: t("Missing skill") }]),
+            ...document.catalog.skills.map((s) => ({ value: s.id, label: skillName(document.catalog, s.id, language) })),
+          ]}
           onChange={(id) => update((k) => void (k.target = { type: "skill", skillId: id }))}
         />
       ) : (
@@ -846,8 +864,8 @@ function CheckEditor({ kind, update, document }: { kind: KindOf<"check">; update
         <FormRow label={t("Hero’s chance")}>
           <span className="value">
             {(() => {
-              const value = valueForTarget(hero.skills, hero.characteristics, kind.target);
-              return t("%lld%% (%@ %lld)", targetNumber(value, kind.difficulty), checkTargetName(kind.target), value);
+              const value = valueForTarget(document.catalog, hero.skills, hero.characteristics, kind.target);
+              return t("%lld%% (%@ %lld)", targetNumber(value, kind.difficulty), checkTargetName(document.catalog, kind.target, language), value);
             })()}
           </span>
         </FormRow>
@@ -882,7 +900,7 @@ function OpponentReferenceSection({ selection, onChange, document }: { selection
   const story = document.story;
   const language = document.language;
   const heroId = entrance(story)?.heroId;
-  const enemy = opponent(story, selection);
+  const enemy = opponent(document.catalog, story, selection);
   const isMonster = findMonster(story, selection) !== undefined;
   const options: (SelectOption | SelectGroup)[] = [
     ...(enemy ? [] : [{ value: selection, label: t("None") }]),
@@ -1328,8 +1346,8 @@ function CharacterEditor({ document, characterId }: { document: StoryDocument; c
       </FormSection>
 
       <CharacteristicsSection character={character} update={update} />
-      <OccupationSection character={character} update={update} language={language} />
-      <SkillsSection character={character} update={update} language={language} />
+      <OccupationSection character={character} update={update} document={document} />
+      <SkillsSection character={character} update={update} document={document} />
 
       <FormSection header={t("Stats")}>
         <NumberField title={t("Age")} value={character.age} min={1} max={999} onChange={(v) => update((c) => void (c.age = v))} />
@@ -1479,50 +1497,34 @@ function DerivedRow({ title, value }: { title: string; value: number | string })
 
 // MARK: Occupation and skills
 
-/// Text descriptions of occupation rules for the designer.
-function formulaText(formula: SkillPointFormula): string {
-  if (formula.others.length === 0) return "EDU × 4";
-  return `EDU × 2 + ${formula.others.map((c) => ABBREVIATIONS[c]).join("/")} × 2`;
-}
-
-function occupationSkillsText(job: Occupation): string {
-  return job.skills
-    .map((slot) => {
-      switch (slot.type) {
-        case "skill":
-          return slot.specialty ? `${skillName(slot.id)} (${specialtyName(slot.specialty)})` : skillName(slot.id);
-        case "oneOf":
-          return slot.ids.map(skillName).join(t(" or "));
-        case "interpersonal":
-          return t("%lld interpersonal (Charm, Fast Talk, Intimidate, Persuade)", slot.count);
-        case "any":
-          return t("%lld other skills of your choice", slot.count);
-      }
-    })
-    .join(t(", "));
-}
-
-/// The occupation: picks the skill point formula, credit rating range, and occupation skills.
-function OccupationSection({ character, update, language }: {
+/// The occupation: picks the skill point formula, wealth range, and occupation skills.
+function OccupationSection({ character, update, document }: {
   character: StoryCharacter;
   update: (change: (c: Draft<StoryCharacter>) => void) => void;
-  language: string;
+  document: StoryDocument;
 }) {
-  const job = occupation(character.occupationId);
-  const sorted = OCCUPATIONS.map((o) => ({ value: o.id, label: occupationName(o.id) })).sort((a, b) => a.label.localeCompare(b.label, language));
+  const language = document.language;
+  const catalog = document.catalog;
+  const job = catalog.occupation(character.occupationId);
+  const wealth = wealthSkill(catalog);
+  const sorted = catalog.occupations
+    .map((o) => ({ value: o.id, label: occupationName(catalog, o.id, language) }))
+    .sort((a, b) => a.label.localeCompare(b.label, language));
 
-  const addOccupationSkills = (o: Occupation) => {
-    const wanted: { id: string; specialty?: string }[] = [{ id: "creditRating" }];
-    for (const slot of o.skills) {
-      if (slot.type === "skill") wanted.push({ id: slot.id, specialty: slot.specialty });
-      else if (slot.type === "oneOf") wanted.push({ id: slot.ids[0] });
+  const addOccupationSkills = (o: StoryOccupation) => {
+    const wanted: { id: string; specialty: StoryText }[] = wealth ? [{ id: wealth.id, specialty: [] }] : [];
+    for (const slot of o.slots) {
+      if (slot.type === "skill") wanted.push({ id: slot.skillId, specialty: slot.specialty });
+      else if (slot.type === "oneOf" && slot.skillIds.length > 0) wanted.push({ id: slot.skillIds[0], specialty: [] });
     }
     update((c) => {
       for (const { id, specialty } of wanted) {
-        const text: StoryText = specialty ? localizedText(specialty, language) : [];
+        if (!catalog.skill(id)) continue;
         // Skip skills already on the list, matching specialty too (Science (Biology) vs Science (Physics)).
-        const exists = c.skills.some((entry) => entry.skillId === id && (specialty === undefined || translation(entry.specialty, language) === translation(text, language)));
-        if (!exists) c.skills.push({ id: makeId(), skillId: id, specialty: text, occupationPoints: 0, personalPoints: 0 });
+        const exists = c.skills.some(
+          (entry) => entry.skillId === id && (isBlank(specialty) || translation(entry.specialty, language) === translation(specialty, language)),
+        );
+        if (!exists) c.skills.push({ id: makeId(), skillId: id, specialty: structuredClone(specialty), occupationPoints: 0, personalPoints: 0 });
       }
     });
   };
@@ -1532,45 +1534,48 @@ function OccupationSection({ character, update, language }: {
       header={t("Occupation")}
       footer={
         job
-          ? t("Occupation points go into the occupation’s skills and Credit Rating, which must stay within the range above.")
+          ? t("Occupation points go into the occupation’s skills and its wealth skill, which must stay within the range above.")
           : t("A custom occupation earns EDU × 4 occupation points, which can go into any skill.")
       }
     >
       <SelectRow
         title={t("Occupation")}
-        value={character.occupationId}
+        value={job ? character.occupationId : ""}
         options={[{ value: "", label: t("Custom") }, ...sorted]}
         onChange={(id) => update((c) => void (c.occupationId = id))}
       />
       {job ? (
         <>
-          <FormRow label={t("Credit rating")}>
-            <span className="value">
-              {job.creditRating[0]}–{job.creditRating[1]}
-            </span>
-          </FormRow>
+          {wealth && (
+            <FormRow label={resolve(wealth.name, language)}>
+              <span className="value">
+                {job.wealth[0]}–{job.wealth[1]}
+              </span>
+            </FormRow>
+          )}
           <FormRow label={t("Occupation points")}>
             <span className="value">
-              {formulaText(job.points)} = {occupationPointBudget(character)}
+              {formulaText(job.points)} = {occupationPointBudget(catalog, character)}
             </span>
           </FormRow>
           <FormRow stack>
             <span>{t("Occupation skills")}</span>
-            <span className="callout secondary">{occupationSkillsText(job)}</span>
+            <span className="callout secondary">{occupationSkillsText(catalog, job, language)}</span>
           </FormRow>
           <ButtonRow
             symbol="text.badge.plus"
             title={t("Add Occupation Skills")}
-            help={t("Adds this occupation’s named skills and Credit Rating to the list, ready for points.")}
+            help={t("Adds this occupation’s named skills and its wealth skill to the list, ready for points.")}
             onClick={() => addOccupationSkills(job)}
           />
+          <ButtonRow symbol="briefcase" title={t("Edit Occupation")} onClick={() => (document.selection = { type: "occupation", id: job.id })} />
         </>
       ) : (
         <>
           <LocalizedField title={t("Occupation name")} text={character.calling} language={language} prompt={t("Spellblade")} onChange={(v) => update((c) => void (c.calling = v))} />
           <FormRow label={t("Occupation points")}>
             <span className="value">
-              {formulaText(CUSTOM_POINTS)} = {occupationPointBudget(character)}
+              {formulaText(CUSTOM_POINTS)} = {occupationPointBudget(catalog, character)}
             </span>
           </FormRow>
         </>
@@ -1580,45 +1585,49 @@ function OccupationSection({ character, update, language }: {
 }
 
 /// The character's skills: base value plus occupation and personal points, with both budgets.
-function SkillsSection({ character, update, language }: {
+function SkillsSection({ character, update, document }: {
   character: StoryCharacter;
   update: (change: (c: Draft<StoryCharacter>) => void) => void;
-  language: string;
+  document: StoryDocument;
 }) {
-  const job = occupation(character.occupationId);
-  const occupationLeft = occupationPointBudget(character) - occupationPointsSpent(character);
+  const language = document.language;
+  const catalog = document.catalog;
+  const job = catalog.occupation(character.occupationId);
+  const occupationBudget = occupationPointBudget(catalog, character);
+  const occupationLeft = occupationBudget - occupationPointsSpent(character);
   const personalLeft = personalPointBudget(character) - personalPointsSpent(character);
 
-  /// Spreads unspent points evenly, keeping every skill at 99 or below and Mythos at 0.
+  /// Spreads unspent points evenly, keeping every skill at 99 or below and skipping skills not bought at creation.
   const autoDistribute = () =>
     update((c) => {
       const characteristics = c.characteristics;
+      const value = (index: number) => entryValue(catalog, c.skills[index], characteristics);
       const spread = (points: number, indices: number[], key: "occupationPoints" | "personalPoints") => {
         let remaining = points;
         let open = [...indices];
         while (remaining > 0 && open.length > 0) {
           const share = Math.max(1, Math.trunc(remaining / open.length));
           for (const index of open) {
-            const room = 99 - entryValue(c.skills[index], characteristics);
-            const given = Math.max(0, Math.min(share, room, remaining));
+            const given = Math.max(0, Math.min(share, 99 - value(index), remaining));
             c.skills[index][key] += given;
             remaining -= given;
           }
-          open = open.filter((index) => 99 - entryValue(c.skills[index], characteristics) > 0);
+          open = open.filter((index) => 99 - value(index) > 0);
           if (share === 1 && remaining > 0 && open.length === 0) break;
         }
       };
-      const eligible = c.skills.map((_, i) => i).filter((i) => c.skills[i].skillId !== "mythos");
-      const occupationSkills = eligible.filter((i) => (job ? allowsOccupationPoints(job, c.skills[i].skillId) : true));
+      const eligible = c.skills.map((_, i) => i).filter((i) => catalog.skill(c.skills[i].skillId)?.atCreation ?? false);
+      const occupationSkills = eligible.filter((i) => (job ? allowsOccupationPoints(catalog, job, c.skills[i].skillId) : true));
       const snapshot = c as StoryCharacter;
-      spread(occupationPointBudget(snapshot) - occupationPointsSpent(snapshot), occupationSkills, "occupationPoints");
+      spread(occupationPointBudget(catalog, snapshot) - occupationPointsSpent(snapshot), occupationSkills, "occupationPoints");
       spread(personalPointBudget(snapshot) - personalPointsSpent(snapshot), eligible, "personalPoints");
-      // Keep Credit Rating inside the occupation's range.
-      const credit = c.skills.find((s) => s.skillId === "creditRating");
+      // Keep wealth inside the occupation's range.
+      const wealth = wealthSkill(catalog);
+      const credit = wealth ? c.skills.find((s) => s.skillId === wealth.id) : undefined;
       if (job && credit) {
-        const value = entryValue(credit, characteristics);
-        if (value > job.creditRating[1]) {
-          const excess = value - job.creditRating[1];
+        const current = entryValue(catalog, credit, characteristics);
+        if (current > job.wealth[1]) {
+          const excess = current - job.wealth[1];
           const fromPersonal = Math.min(excess, credit.personalPoints);
           credit.personalPoints -= fromPersonal;
           credit.occupationPoints -= excess - fromPersonal;
@@ -1630,11 +1639,11 @@ function SkillsSection({ character, update, language }: {
     <FormSection
       header={t("Skills")}
       footer={t(
-        "Each skill is its base value plus occupation and personal-interest points (INT × 2). Skills not listed stay at their base. Skills can’t go above 99, and Mythos can’t be bought at creation.",
+        "Each skill is its base value plus occupation and personal-interest points (INT × 2). Skills not listed stay at their base. Skills can’t go above 99, and some, like Cthulhu Mythos, can’t be bought at creation.",
       )}
     >
       <FormRow>
-        <BudgetLabel title={t("Occupation")} left={occupationLeft} budget={occupationPointBudget(character)} />
+        <BudgetLabel title={t("Occupation")} left={occupationLeft} budget={occupationBudget} />
         <BudgetLabel title={t("Personal")} left={personalLeft} budget={personalPointBudget(character)} />
       </FormRow>
       {character.skills.map((entry, index) => (
@@ -1643,7 +1652,8 @@ function SkillsSection({ character, update, language }: {
           character={character}
           index={index}
           language={language}
-          isOccupationSkill={job ? allowsOccupationPoints(job, entry.skillId) : true}
+          catalog={catalog}
+          isOccupationSkill={job ? allowsOccupationPoints(catalog, job, entry.skillId) : true}
           update={update}
         />
       ))}
@@ -1654,8 +1664,8 @@ function SkillsSection({ character, update, language }: {
           onClick={(e) =>
             showMenuBelow(
               e.currentTarget,
-              SKILLS.map((s) => ({
-                label: skillName(s.id),
+              catalog.skills.map((s) => ({
+                label: skillName(catalog, s.id, language),
                 action: () => update((c) => void c.skills.push({ id: makeId(), skillId: s.id, specialty: [], occupationPoints: 0, personalPoints: 0 })),
               })),
             )
@@ -1705,22 +1715,23 @@ function BudgetLabel({ title, left, budget }: { title: string; left: number; bud
   );
 }
 
-function SkillEntryRow({ character, index, language, isOccupationSkill, update }: {
+function SkillEntryRow({ character, index, language, catalog, isOccupationSkill, update }: {
   character: StoryCharacter;
   index: number;
   language: string;
+  catalog: SkillCatalog;
   isOccupationSkill: boolean;
   update: (change: (c: Draft<StoryCharacter>) => void) => void;
 }) {
   const entry = character.skills[index];
-  const definition = skillDefinition(entry.skillId);
-  const base = definition ? baseValue(definition.base, character.characteristics) : 0;
-  const total = entryValue(entry, character.characteristics);
+  const definition = catalog.skill(entry.skillId);
+  const base = skillBase(catalog, entry.skillId, character.characteristics);
+  const total = entryValue(catalog, entry, character.characteristics);
   const set = (change: (e: Draft<StoryCharacter["skills"][number]>) => void) => update((c) => change(c.skills[index]));
   return (
     <FormRow stack>
       <span className="row" style={{ gap: 6 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>{definition ? skillName(entry.skillId) : entry.skillId}</span>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>{definition ? skillName(catalog, entry.skillId, language) : t("Missing skill")}</span>
         {isOccupationSkill && (
           <span title={t("Occupation skill")} className="accent" style={{ display: "inline-flex" }}>
             <Icon name="briefcase" size={12} />
@@ -1767,7 +1778,7 @@ function ItemEditor({ document, itemId }: { document: StoryDocument; itemId: str
   const update = (change: (i: Draft<Item>) => void) => document.updateItem(itemId, change);
   const carriers = document.charactersCarrying(itemId);
   const nodes = document.nodesHandingOut(itemId);
-  const weaponSkills = SKILLS.filter((s) => s.id.startsWith("fighting") || s.id.startsWith("firearms"));
+  const weaponSkills = document.catalog.skills.filter((s) => s.combat.type === "weapon");
 
   return (
     <div className="form">
@@ -1798,13 +1809,16 @@ function ItemEditor({ document, itemId }: { document: StoryDocument; itemId: str
         <FormSection
           header={t("Weapon")}
           footer={t(
-            "A character can attack with a weapon only if its skill is on their sheet. Melee weapons usually add the wielder’s damage bonus (from STR + SIZ); firearms don’t. Impaling weapons — blades, spears, bullets — deal extra damage on an extreme success. Firearms can’t be dodged and let the shooter act first.",
+            "A character can attack with a weapon only if its skill is on their sheet. Whether a weapon is melee or ranged comes from its skill on the skill sheet. Melee weapons usually add the wielder’s damage bonus (from STR + SIZ); ranged ones don’t. Impaling weapons — blades, spears, bullets — deal extra damage on an extreme success. Ranged weapons can’t be dodged and let the shooter act first.",
           )}
         >
           <SelectRow
             title={t("Skill")}
             value={item.skillId}
-            options={[...(item.skillId === "" ? [{ value: "", label: t("None") }] : []), ...weaponSkills.map((s) => ({ value: s.id, label: skillName(s.id) }))]}
+            options={[
+              ...(weaponSkills.some((s) => s.id === item.skillId) ? [] : [{ value: item.skillId, label: item.skillId === "" ? t("None") : t("Missing skill") }]),
+              ...weaponSkills.map((s) => ({ value: s.id, label: skillName(document.catalog, s.id, language) })),
+            ]}
             onChange={(id) => update((i) => void (i.skillId = id))}
           />
           <DamageRollField title={t("Damage")} value={item.damage} onChange={(v) => update((i) => void (i.damage = v))} />
@@ -2070,6 +2084,459 @@ function EventEditor({ document, eventId }: { document: StoryDocument; eventId: 
       <FormSection>
         <ButtonRow symbol="plus.square.on.square" title={t("Duplicate Event")} onClick={() => document.duplicateEvent(eventId)} />
         <ButtonRow symbol="trash" title={t("Delete Event")} destructive onClick={() => document.deleteEvent(eventId)} />
+      </FormSection>
+    </div>
+  );
+}
+
+// MARK: - Skills
+
+/// A row that jumps to a sheet entry, such as a character or an occupation.
+function SheetLink({ symbol, title, onClick }: { symbol: string; title: string; onClick: () => void }) {
+  return (
+    <div role="button" className="form-row button-row" style={{ color: "var(--text)" }} onClick={onClick}>
+      <Icon name={symbol} size={14} />
+      {title}
+    </div>
+  );
+}
+
+function SkillEditor({ document, skillId }: { document: StoryDocument; skillId: string }) {
+  const catalog = document.catalog;
+  const skill = catalog.skill(skillId)!;
+  const language = document.language;
+  const update = (change: (s: Draft<StorySkill>) => void) => document.updateSkill(skillId, change);
+  const usage = document.skillUsage(skillId);
+  const hero = heroCharacter(document.story);
+  const combat = skill.combat;
+
+  const setCombat = (type: StorySkill["combat"]["type"]) =>
+    update((s) => {
+      if (s.combat.type === type) return;
+      switch (type) {
+        case "none":
+          s.combat = { type: "none" };
+          break;
+        case "weapon":
+          s.combat = { type: "weapon", range: "melee", unarmed: null };
+          break;
+        case "dodge":
+          s.combat = { type: "dodge" };
+          break;
+        case "ability":
+          s.combat = {
+            type: "ability",
+            ability: {
+              effect: "damage",
+              amount: { count: 2, sides: 6, bonus: 0 },
+              addsDamageBonus: false,
+              piercesArmor: true,
+              dodgeable: true,
+              target: "enemy",
+              cost: { mp: 4, hp: 0, stamina: 0, sanity: 0 },
+            },
+          };
+          break;
+      }
+    });
+  const updateAbility = (change: (a: Draft<SkillAbility>) => void) => update((s) => void (s.combat.type === "ability" && change(s.combat.ability)));
+
+  const combatFooter = {
+    none: t("Only checks roll this skill."),
+    weapon: t("Weapons that use this skill attack with it. Melee attacks can be dodged or fought back; ranged ones can’t, and the shooter acts first. A skill usable bare-handed gives everyone who has it an unarmed attack."),
+    dodge: t("Rolled to get out of the way. In a fight the hero can spend a round dodging, and enemies dodge with their best dodge skill."),
+    ability: t("A battle action of its own, like a spell: the cost is paid, then the skill is rolled, and a success deals damage or heals. Characters can use abilities on their sheet. With one opponent, “all enemies” means that one."),
+  }[combat.type];
+
+  return (
+    <div className="form">
+      <FormSection
+        header={
+          <span className="row" style={{ gap: 6 }}>
+            <Icon name="list.bullet.clipboard" size={13} />
+            {t("Skill")}
+          </span>
+        }
+        footer={catalog.isBuiltIn.skills ? t("This story uses the built-in skills. Your first change copies them into the story, where you can change or delete any of them.") : undefined}
+      >
+        <NameRow symbol={skill.symbol} onSymbol={(v) => update((s) => void (s.symbol = v))} text={skill.name} language={language} onChange={(v) => update((s) => void (s.name = v))} />
+        <LocalizedField
+          title={t("Description")}
+          text={skill.detail}
+          language={language}
+          multiline
+          prompt={t("What the skill covers, for your own reference.")}
+          onChange={(v) => update((s) => void (s.detail = v))}
+        />
+        <SelectRow
+          title={t("Group")}
+          value={skill.group}
+          options={SKILL_GROUPS.map((g) => ({ value: g, label: groupName(g) }))}
+          onChange={(g) => update((s) => void (s.group = g as SkillGroup))}
+        />
+      </FormSection>
+
+      <FormSection
+        header={t("Base Value")}
+        footer={t("Where the skill starts before any points: a fixed number, or a share of a characteristic, as Dodge starts at half DEX.")}
+      >
+        <SegmentedRow
+          title={t("Starts at")}
+          value={skill.base.type}
+          options={[
+            { value: "fixed", label: t("Fixed") },
+            { value: "characteristic", label: t("Characteristic") },
+          ]}
+          onChange={(type) =>
+            update((s) => void (s.base = type === "fixed" ? { type: "fixed", value: 10 } : { type: "characteristic", characteristic: "dexterity", divisor: 2 }))
+          }
+        />
+        {skill.base.type === "fixed" ? (
+          <NumberField title={t("Starting value")} value={skill.base.value} min={0} max={99} onChange={(v) => update((s) => void (s.base.type === "fixed" && (s.base.value = v)))} />
+        ) : (
+          <>
+            <SelectRow
+              title={t("Characteristic")}
+              value={skill.base.characteristic}
+              options={characteristicOptions()}
+              onChange={(c) => update((s) => void (s.base.type === "characteristic" && (s.base.characteristic = c as Characteristic)))}
+            />
+            <SelectRow
+              title={t("Share")}
+              value={String(skill.base.divisor)}
+              options={[
+                { value: "1", label: t("All of it") },
+                { value: "2", label: t("Half") },
+                { value: "5", label: t("A fifth") },
+              ]}
+              onChange={(d) => update((s) => void (s.base.type === "characteristic" && (s.base.divisor = Number(d))))}
+            />
+          </>
+        )}
+        {hero && (
+          <FormRow label={t("Hero’s value")}>
+            <span className="value">{characterSkillValue(catalog, hero, skillId)}</span>
+          </FormRow>
+        )}
+      </FormSection>
+
+      <FormSection
+        header={t("Rules")}
+        footer={t("Uncommon skills only show on a character sheet once a character has them. The wealth skill is the one occupations give a range for, like Credit Rating; a story has at most one.")}
+      >
+        <ToggleRow title={t("Takes a specialty")} on={skill.takesSpecialty} onChange={(v) => update((s) => void (s.takesSpecialty = v))} />
+        <ToggleRow title={t("Uncommon")} on={skill.isUncommon} onChange={(v) => update((s) => void (s.isUncommon = v))} />
+        <ToggleRow title={t("Points at character creation")} on={skill.atCreation} onChange={(v) => update((s) => void (s.atCreation = v))} />
+        <ToggleRow title={t("Measures wealth")} on={skill.isWealth} onChange={(v) => update((s) => void (s.isWealth = v))} />
+      </FormSection>
+
+      <FormSection header={t("In Battle")} footer={combatFooter}>
+        <SelectRow
+          title={t("Use")}
+          value={combat.type}
+          options={[
+            { value: "none", label: t("None") },
+            { value: "weapon", label: t("Weapon skill") },
+            { value: "dodge", label: t("Dodge") },
+            { value: "ability", label: t("Ability") },
+          ]}
+          onChange={(type) => setCombat(type as StorySkill["combat"]["type"])}
+        />
+        {combat.type === "weapon" && (
+          <>
+            <SegmentedRow
+              title={t("Range")}
+              value={combat.range}
+              options={[
+                { value: "melee", label: t("Melee") },
+                { value: "ranged", label: t("Ranged") },
+              ]}
+              onChange={(range) => update((s) => void (s.combat.type === "weapon" && (s.combat.range = range)))}
+            />
+            <ToggleRow
+              title={t("Usable bare-handed")}
+              on={combat.unarmed !== null}
+              onChange={(on) => update((s) => void (s.combat.type === "weapon" && (s.combat.unarmed = on ? { count: 1, sides: 3, bonus: 0 } : null)))}
+            />
+            {combat.unarmed && (
+              <DamageRollField
+                title={t("Bare-handed damage")}
+                value={combat.unarmed}
+                onChange={(v) => update((s) => void (s.combat.type === "weapon" && (s.combat.unarmed = v)))}
+              />
+            )}
+          </>
+        )}
+        {combat.type === "ability" && (
+          <>
+            <SegmentedRow
+              title={t("Effect")}
+              value={combat.ability.effect}
+              options={[
+                { value: "damage", label: t("Damage") },
+                { value: "heal", label: t("Heal") },
+              ]}
+              onChange={(effect) =>
+                updateAbility((a) => {
+                  a.effect = effect;
+                  if (effect === "heal") a.target = "self";
+                  else if (a.target === "self") a.target = "enemy";
+                })
+              }
+            />
+            <DamageRollField title={combat.ability.effect === "heal" ? t("Healing") : t("Damage")} value={combat.ability.amount} onChange={(v) => updateAbility((a) => void (a.amount = v))} />
+            {combat.ability.effect === "damage" && (
+              <>
+                <SelectRow
+                  title={t("Target")}
+                  value={combat.ability.target}
+                  options={[
+                    { value: "enemy", label: t("One enemy") },
+                    { value: "allEnemies", label: t("All enemies") },
+                    { value: "self", label: t("Yourself") },
+                  ]}
+                  onChange={(target) => updateAbility((a) => void (a.target = target as SkillAbility["target"]))}
+                />
+                <ToggleRow title={t("Can be dodged")} on={combat.ability.dodgeable} onChange={(v) => updateAbility((a) => void (a.dodgeable = v))} />
+                <ToggleRow title={t("Ignores armor")} on={combat.ability.piercesArmor} onChange={(v) => updateAbility((a) => void (a.piercesArmor = v))} />
+                <ToggleRow title={t("Adds damage bonus")} on={combat.ability.addsDamageBonus} onChange={(v) => updateAbility((a) => void (a.addsDamageBonus = v))} />
+              </>
+            )}
+            <NumberField title={t("Costs magic points")} value={combat.ability.cost.mp} min={0} max={99} onChange={(v) => updateAbility((a) => void (a.cost.mp = v))} />
+            <NumberField title={t("Costs hit points")} value={combat.ability.cost.hp} min={0} max={99} onChange={(v) => updateAbility((a) => void (a.cost.hp = v))} />
+            <NumberField title={t("Costs stamina")} value={combat.ability.cost.stamina} min={0} max={999} onChange={(v) => updateAbility((a) => void (a.cost.stamina = v))} />
+            <NumberField title={t("Costs sanity")} value={combat.ability.cost.sanity} min={0} max={99} onChange={(v) => updateAbility((a) => void (a.cost.sanity = v))} />
+          </>
+        )}
+      </FormSection>
+
+      <FormSection header={t("Used By")}>
+        {usage.checks.length + usage.items.length + usage.characters.length + usage.occupations.length === 0 && (
+          <FormRow>
+            <span className="secondary">{t("Nothing uses this skill yet.")}</span>
+          </FormRow>
+        )}
+        {usage.checks.map((node) => (
+          <NodeLink key={node.id} node={node} document={document} />
+        ))}
+        {usage.items.map((item) => (
+          <SheetLink key={item.id} symbol={item.symbol} title={nameOf(item.name, language)} onClick={() => (document.selection = { type: "item", id: item.id })} />
+        ))}
+        {usage.characters.map((c) => (
+          <SheetLink key={c.id} symbol={c.symbol || "person"} title={nameOf(c.name, language)} onClick={() => (document.selection = { type: "character", id: c.id })} />
+        ))}
+        {usage.occupations.map((o) => (
+          <SheetLink key={o.id} symbol={o.symbol || "briefcase"} title={nameOf(o.name, language)} onClick={() => (document.selection = { type: "occupation", id: o.id })} />
+        ))}
+      </FormSection>
+
+      <FormSection footer={t("Deleting a skill removes it from every character, occupation, and weapon. Checks that roll it are flagged so you can pick another.")}>
+        <ButtonRow symbol="plus.square.on.square" title={t("Duplicate Skill")} onClick={() => document.duplicateSkill(skillId)} />
+        <ButtonRow symbol="trash" title={t("Delete Skill")} destructive onClick={() => document.deleteSkill(skillId)} />
+      </FormSection>
+    </div>
+  );
+}
+
+// MARK: - Occupations
+
+function OccupationEditor({ document, occupationId }: { document: StoryDocument; occupationId: string }) {
+  const catalog = document.catalog;
+  const occupation = catalog.occupation(occupationId)!;
+  const language = document.language;
+  const update = (change: (o: Draft<StoryOccupation>) => void) => document.updateOccupation(occupationId, change);
+  const wealth = wealthSkill(catalog);
+  const hero = heroCharacter(document.story);
+  const skillOptions = catalog.skills.map((s) => ({ value: s.id, label: skillName(catalog, s.id, language) }));
+  const updateSlot = (index: number, change: (slot: Draft<OccupationSlot>) => void) => update((o) => change(o.slots[index]));
+
+  const slotEditor = (slot: OccupationSlot, index: number) => {
+    const remove = <RemoveButton title={t("Remove")} onClick={() => update((o) => void o.slots.splice(index, 1))} />;
+    switch (slot.type) {
+      case "skill":
+        return (
+          <FormRow key={index}>
+            <Select
+              value={slot.skillId}
+              options={[...(catalog.skill(slot.skillId) ? [] : [{ value: slot.skillId, label: t("Missing skill") }]), ...skillOptions]}
+              ariaLabel={t("Skill")}
+              style={{ flex: 1, width: "auto" }}
+              onChange={(id) => updateSlot(index, (s) => void (s.type === "skill" && (s.skillId = id)))}
+            />
+            {catalog.skill(slot.skillId)?.takesSpecialty && (
+              <input
+                className="text-field narrow-text"
+                value={translation(slot.specialty, language) ?? ""}
+                placeholder={isBlank(slot.specialty) ? t("Specialty") : resolve(slot.specialty, language)}
+                aria-label={t("Specialty")}
+                onChange={(e) =>
+                  updateSlot(index, (s) => void (s.type === "skill" && (s.specialty = withTranslation(slot.specialty, language, e.target.value === "" ? undefined : e.target.value))))
+                }
+              />
+            )}
+            {remove}
+          </FormRow>
+        );
+      case "oneOf":
+        return (
+          <FormRow key={index} stack>
+            <span className="row" style={{ gap: 6 }}>
+              <span className="secondary">{t("One of")}</span>
+              <span className="spacer" />
+              {remove}
+            </span>
+            <span className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              {slot.skillIds.map((id, i) => (
+                <span key={`${id}-${i}`} className="skill-chip removable">
+                  {skillName(catalog, id, language)}
+                  <button type="button" aria-label={t("Remove")} onClick={() => updateSlot(index, (s) => void (s.type === "oneOf" && s.skillIds.splice(i, 1)))}>
+                    <Icon name="xmark" size={10} />
+                  </button>
+                </span>
+              ))}
+              <button
+                type="button"
+                className="btn btn-borderless"
+                onClick={(e) =>
+                  showMenuBelow(
+                    e.currentTarget,
+                    skillOptions.map((o) => ({ label: o.label, action: () => updateSlot(index, (s) => void (s.type === "oneOf" && s.skillIds.push(o.value))) })),
+                  )
+                }
+              >
+                <Icon name="plus" size={12} />
+                {t("Add")}
+              </button>
+            </span>
+          </FormRow>
+        );
+      case "group":
+        return (
+          <FormRow key={index}>
+            <NumberInput className="narrow" value={slot.count} min={1} max={20} ariaLabel={t("Count")} onChange={(v) => updateSlot(index, (s) => void (s.type === "group" && (s.count = v)))} />
+            <span className="secondary">{t("from")}</span>
+            <Select
+              value={slot.group}
+              options={SKILL_GROUPS.map((g) => ({ value: g, label: groupName(g) }))}
+              ariaLabel={t("Group")}
+              style={{ flex: 1, width: "auto" }}
+              onChange={(g) => updateSlot(index, (s) => void (s.type === "group" && (s.group = g as SkillGroup)))}
+            />
+            {remove}
+          </FormRow>
+        );
+      case "any":
+        return (
+          <FormRow key={index}>
+            <NumberInput className="narrow" value={slot.count} min={1} max={20} ariaLabel={t("Count")} onChange={(v) => updateSlot(index, (s) => void (s.type === "any" && (s.count = v)))} />
+            <span className="secondary" style={{ flex: 1 }}>
+              {t("other skills of the player’s choice")}
+            </span>
+            {remove}
+          </FormRow>
+        );
+    }
+  };
+
+  return (
+    <div className="form">
+      <FormSection
+        header={
+          <span className="row" style={{ gap: 6 }}>
+            <Icon name="briefcase" size={13} />
+            {t("Occupation")}
+          </span>
+        }
+        footer={
+          catalog.isBuiltIn.occupations
+            ? t("This story uses the built-in occupations. Your first change copies them into the story, where you can change or delete any of them.")
+            : undefined
+        }
+      >
+        <NameRow symbol={occupation.symbol} onSymbol={(v) => update((o) => void (o.symbol = v))} text={occupation.name} language={language} onChange={(v) => update((o) => void (o.name = v))} />
+        <LocalizedField
+          title={t("Description")}
+          text={occupation.detail}
+          language={language}
+          multiline
+          prompt={t("Shown to players choosing an occupation.")}
+          onChange={(v) => update((o) => void (o.detail = v))}
+        />
+        {wealth && (
+          <FormRow label={resolve(wealth.name, language)}>
+            <NumberInput className="narrow" value={occupation.wealth[0]} min={0} max={99} ariaLabel={t("Lowest")} onChange={(v) => update((o) => void (o.wealth[0] = v))} />
+            <span className="secondary">–</span>
+            <NumberInput className="narrow" value={occupation.wealth[1]} min={0} max={99} ariaLabel={t("Highest")} onChange={(v) => update((o) => void (o.wealth[1] = v))} />
+          </FormRow>
+        )}
+      </FormSection>
+
+      <FormSection
+        header={t("Occupation Points")}
+        footer={t("Each line adds the best of its characteristics times its multiplier. EDU × 4 is the usual formula; EDU × 2 + DEX/STR × 2 rewards a strong or nimble character.")}
+      >
+        {occupation.points.map((term, index) => (
+          <FormRow key={index}>
+            <span className="toggle-chips">
+              {CHARACTERISTICS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  aria-pressed={term.characteristics.includes(c)}
+                  title={characteristicName(c)}
+                  onClick={() =>
+                    update((o) => {
+                      const list = o.points[index].characteristics;
+                      o.points[index].characteristics = list.includes(c) ? list.filter((x) => x !== c) : CHARACTERISTICS.filter((x) => x === c || list.includes(x));
+                    })
+                  }
+                >
+                  {ABBREVIATIONS[c]}
+                </button>
+              ))}
+            </span>
+            <span className="secondary">×</span>
+            <NumberInput className="narrow" value={term.multiplier} min={1} max={10} ariaLabel={t("Multiplier")} onChange={(v) => update((o) => void (o.points[index].multiplier = v))} />
+            <RemoveButton title={t("Remove")} onClick={() => update((o) => void o.points.splice(index, 1))} />
+          </FormRow>
+        ))}
+        <ButtonRow symbol="plus" title={t("Add Term")} onClick={() => update((o) => void o.points.push({ characteristics: ["education"], multiplier: 2 }))} />
+        <FormRow label={t("Formula")}>
+          <span className="value">
+            {formulaText(occupation.points)}
+            {hero ? ` = ${formulaPoints(occupation.points, hero.characteristics)}` : ""}
+          </span>
+        </FormRow>
+      </FormSection>
+
+      <FormSection header={t("Occupation Skills")} footer={t("Occupation points can go into these skills and the wealth skill. Any “other skills” slot opens every skill.")}>
+        {occupation.slots.map(slotEditor)}
+        <ButtonRow
+          symbol="plus"
+          title={t("Add Skill Slot")}
+          onClick={() =>
+            update((o) => void o.slots.push({ type: "skill", skillId: catalog.skills.find((s) => !s.isWealth)?.id ?? "", specialty: [] }))
+          }
+        />
+        <ButtonRow symbol="plus" title={t("Add “One Of” Slot")} onClick={() => update((o) => void o.slots.push({ type: "oneOf", skillIds: [] }))} />
+        <ButtonRow symbol="plus" title={t("Add Group Slot")} onClick={() => update((o) => void o.slots.push({ type: "group", group: "interpersonal", count: 1 }))} />
+        <ButtonRow symbol="plus" title={t("Add “Any Skill” Slot")} onClick={() => update((o) => void o.slots.push({ type: "any", count: 1 }))} />
+      </FormSection>
+
+      <FormSection header={t("Used By")}>
+        {document.charactersWithOccupation(occupationId).length === 0 && (
+          <FormRow>
+            <span className="secondary">{t("No character has this occupation yet. Players can still pick it when they create a hero.")}</span>
+          </FormRow>
+        )}
+        {document.charactersWithOccupation(occupationId).map((c) => (
+          <SheetLink key={c.id} symbol={c.symbol || "person"} title={nameOf(c.name, language)} onClick={() => (document.selection = { type: "character", id: c.id })} />
+        ))}
+      </FormSection>
+
+      <FormSection>
+        <ButtonRow symbol="plus.square.on.square" title={t("Duplicate Occupation")} onClick={() => document.duplicateOccupation(occupationId)} />
+        <ButtonRow symbol="trash" title={t("Delete Occupation")} destructive onClick={() => document.deleteOccupation(occupationId)} />
       </FormSection>
     </div>
   );

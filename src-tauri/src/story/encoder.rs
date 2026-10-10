@@ -96,6 +96,28 @@ pub fn encode(story: &Story) -> Result<Vec<u8>> {
         tracks.write_count(context.string(&track.file_extension));
     }
 
+    // The skill and occupation sheets are only written when the story has its own.
+    let skills = story.skills.as_ref().map(|skills| {
+        let mut chunk = ByteWriter::new();
+        chunk.write_count(skills.len());
+        for skill in skills {
+            let mut body = ByteWriter::new();
+            write_skill(skill, &mut body, &mut context);
+            chunk.write_record(&body);
+        }
+        chunk
+    });
+    let occupations = story.occupations.as_ref().map(|occupations| {
+        let mut chunk = ByteWriter::new();
+        chunk.write_count(occupations.len());
+        for occupation in occupations {
+            let mut body = ByteWriter::new();
+            write_occupation(occupation, &mut body, &mut context);
+            chunk.write_record(&body);
+        }
+        chunk
+    });
+
     let mut nodes = ByteWriter::new();
     nodes.write_count(story.nodes.len());
     for node in &story.nodes {
@@ -146,8 +168,7 @@ pub fn encode(story: &Story) -> Result<Vec<u8>> {
         strings.write_inline_string(string);
     }
 
-    let mut payload = ByteWriter::new();
-    for (chunk_tag, body) in [
+    let mut chunk_list = vec![
         (tag::LANGUAGES, &languages),
         (tag::STRINGS, &strings),
         (tag::METADATA, &metadata),
@@ -157,11 +178,17 @@ pub fn encode(story: &Story) -> Result<Vec<u8>> {
         (tag::MONSTERS, &monsters),
         (tag::LOCATIONS, &locations),
         (tag::EVENTS, &events),
-        (tag::ROUTES, &routes),
-        (tag::TRACKS, &tracks),
-        (tag::NODES, &nodes),
-        (tag::LINKS, &links),
-    ] {
+    ];
+    if let Some(skills) = &skills {
+        chunk_list.push((tag::SKILLS, skills));
+    }
+    if let Some(occupations) = &occupations {
+        chunk_list.push((tag::OCCUPATIONS, occupations));
+    }
+    chunk_list.extend([(tag::ROUTES, &routes), (tag::TRACKS, &tracks), (tag::NODES, &nodes), (tag::LINKS, &links)]);
+
+    let mut payload = ByteWriter::new();
+    for (chunk_tag, body) in chunk_list {
         payload.write(chunk_tag);
         payload.write_record(body);
     }
@@ -342,6 +369,104 @@ fn write_damage(damage: &DamageRoll, writer: &mut ByteWriter) {
     writer.write_int(damage.bonus);
 }
 
+/// Skill: `ref` id; `text` name, description; `ref` symbol; `u8` group; base (`u8` 0 then `int` value, or 1 then
+/// `u8` characteristic and `int` divisor); `bool` takes specialty, uncommon, buyable at creation, wealth; combat use as
+/// `u8` 0 none, 1 weapon (`u8` range 0 melee / 1 ranged, `bool` bare-handed, then its damage if so), 2 dodge, or
+/// 3 ability (`u8` effect 0 damage / 1 heal, damage, `bool` adds damage bonus, pierces armor, dodgeable, `u8` target
+/// 0 enemy / 1 all enemies / 2 self, `int` MP, HP, stamina, and sanity cost).
+fn write_skill(skill: &StorySkill, writer: &mut ByteWriter, context: &mut Context) {
+    writer.write_count(context.string(&skill.id));
+    write_text(&skill.name, writer, context);
+    write_text(&skill.detail, writer, context);
+    writer.write_count(context.string(&skill.symbol));
+    writer.write_u8(skill.group as u8);
+    match &skill.base {
+        SkillBase::Fixed { value } => {
+            writer.write_u8(0);
+            writer.write_int(*value);
+        }
+        SkillBase::Characteristic { characteristic, divisor } => {
+            writer.write_u8(1);
+            writer.write_u8(*characteristic as u8);
+            writer.write_int(*divisor);
+        }
+    }
+    for flag in [skill.takes_specialty, skill.is_uncommon, skill.at_creation, skill.is_wealth] {
+        writer.write_bool(flag);
+    }
+    match &skill.combat {
+        SkillCombat::None => writer.write_u8(0),
+        SkillCombat::Weapon { range, unarmed } => {
+            writer.write_u8(1);
+            writer.write_u8(*range as u8);
+            writer.write_bool(unarmed.is_some());
+            if let Some(damage) = unarmed {
+                write_damage(damage, writer);
+            }
+        }
+        SkillCombat::Dodge => writer.write_u8(2),
+        SkillCombat::Ability { ability } => {
+            writer.write_u8(3);
+            writer.write_u8(ability.effect as u8);
+            write_damage(&ability.amount, writer);
+            for flag in [ability.adds_damage_bonus, ability.pierces_armor, ability.dodgeable] {
+                writer.write_bool(flag);
+            }
+            writer.write_u8(ability.target as u8);
+            for cost in [ability.cost.mp, ability.cost.hp, ability.cost.stamina, ability.cost.sanity] {
+                writer.write_int(cost);
+            }
+        }
+    }
+}
+
+/// Occupation: `ref` id; `text` name, description; `ref` symbol; `int` lowest and highest wealth; point terms
+/// (`varuint` count, then `int` multiplier and `varuint` count of `u8` characteristics, the best of which is used);
+/// skill slots (`varuint` count, then `u8` 0 skill with `ref` skill id and `text` specialty, 1 one of with a
+/// `varuint` count of `ref` skill ids, 2 group with `u8` group and `int` count, or 3 any with `int` count).
+fn write_occupation(occupation: &StoryOccupation, writer: &mut ByteWriter, context: &mut Context) {
+    writer.write_count(context.string(&occupation.id));
+    write_text(&occupation.name, writer, context);
+    write_text(&occupation.detail, writer, context);
+    writer.write_count(context.string(&occupation.symbol));
+    writer.write_int(occupation.wealth[0]);
+    writer.write_int(occupation.wealth[1]);
+    writer.write_count(occupation.points.len());
+    for term in &occupation.points {
+        writer.write_int(term.multiplier);
+        writer.write_count(term.characteristics.len());
+        for characteristic in &term.characteristics {
+            writer.write_u8(*characteristic as u8);
+        }
+    }
+    writer.write_count(occupation.slots.len());
+    for slot in &occupation.slots {
+        match slot {
+            OccupationSlot::Skill { skill_id, specialty } => {
+                writer.write_u8(0);
+                writer.write_count(context.string(skill_id));
+                write_text(specialty, writer, context);
+            }
+            OccupationSlot::OneOf { skill_ids } => {
+                writer.write_u8(1);
+                writer.write_count(skill_ids.len());
+                for id in skill_ids {
+                    writer.write_count(context.string(id));
+                }
+            }
+            OccupationSlot::Group { group, count } => {
+                writer.write_u8(2);
+                writer.write_u8(*group as u8);
+                writer.write_int(*count);
+            }
+            OccupationSlot::Any { count } => {
+                writer.write_u8(3);
+                writer.write_int(*count);
+            }
+        }
+    }
+}
+
 /// Monster: `ref` id; `text` name, description; `ref` symbol name; `int` STR, CON, SIZ, DEX, POW, hit points,
 /// fighting; `text` attack name; damage (`int` count, sides, bonus); `bool` adds damage bonus, impales; `int`
 /// attacks per round, dodge, armor, XP reward, gold reward. New attributes go at the end.
@@ -515,6 +640,93 @@ mod tests {
         let encoded = super::encode(&story).unwrap();
         assert_eq!(decoder::decode(&encoded).unwrap(), story);
         assert_eq!(encoded, original, "re-encoding should be byte-for-byte identical");
+    }
+
+    /// A story's own skill and occupation sheets survive a round trip, in every variant.
+    #[test]
+    fn skill_and_occupation_sheets_round_trip() {
+        use super::super::model::*;
+        let file = std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/stories/RebirthInParadise.rpstory")).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut original = vec![];
+        std::io::Read::read_to_end(&mut archive.by_name("story.bin").unwrap(), &mut original).unwrap();
+        let mut story = decoder::decode(&original).unwrap();
+        assert!(story.skills.is_none() && story.occupations.is_none(), "the bundled story uses the built-in catalog");
+
+        let text = |value: &str| StoryText(vec![Translation { language: "en".into(), value: value.into() }]);
+        let skill = |id: &str, combat: SkillCombat, base: SkillBase| StorySkill {
+            id: id.into(),
+            name: text(id),
+            detail: text("detail"),
+            symbol: "flame.fill".into(),
+            group: SkillGroup::Magic,
+            base,
+            takes_specialty: id == "lore",
+            is_uncommon: true,
+            at_creation: false,
+            is_wealth: id == "wealth",
+            combat,
+        };
+        let d6 = DamageRoll { count: 2, sides: 6, bonus: 1 };
+        story.skills = Some(vec![
+            skill("lore", SkillCombat::None, SkillBase::Fixed { value: 5 }),
+            skill("brawl", SkillCombat::Weapon { range: WeaponRange::Melee, unarmed: Some(d6) }, SkillBase::Fixed { value: 25 }),
+            skill("bow", SkillCombat::Weapon { range: WeaponRange::Ranged, unarmed: None }, SkillBase::Fixed { value: 15 }),
+            skill("dodge", SkillCombat::Dodge, SkillBase::Characteristic { characteristic: Characteristic::Dexterity, divisor: 2 }),
+            skill(
+                "fireball",
+                SkillCombat::Ability {
+                    ability: SkillAbility {
+                        effect: AbilityEffect::Damage,
+                        amount: d6,
+                        adds_damage_bonus: false,
+                        pierces_armor: true,
+                        dodgeable: true,
+                        target: AbilityTarget::AllEnemies,
+                        cost: AbilityCost { mp: 4, hp: 0, stamina: 5, sanity: 1 },
+                    },
+                },
+                SkillBase::Characteristic { characteristic: Characteristic::Power, divisor: 5 },
+            ),
+            skill(
+                "mend",
+                SkillCombat::Ability {
+                    ability: SkillAbility {
+                        effect: AbilityEffect::Heal,
+                        amount: d6,
+                        adds_damage_bonus: false,
+                        pierces_armor: false,
+                        dodgeable: false,
+                        target: AbilityTarget::User,
+                        cost: AbilityCost::default(),
+                    },
+                },
+                SkillBase::Fixed { value: 1 },
+            ),
+        ]);
+        story.occupations = Some(vec![StoryOccupation {
+            id: "mage".into(),
+            name: text("Mage"),
+            detail: StoryText::default(),
+            symbol: "sparkles".into(),
+            wealth: [10, 40],
+            points: vec![
+                PointTerm { characteristics: vec![Characteristic::Education], multiplier: 2 },
+                PointTerm { characteristics: vec![Characteristic::Power, Characteristic::Intelligence], multiplier: 2 },
+            ],
+            slots: vec![
+                OccupationSlot::Skill { skill_id: "fireball".into(), specialty: text("Fire") },
+                OccupationSlot::OneOf { skill_ids: vec!["bow".into(), "brawl".into()] },
+                OccupationSlot::Group { group: SkillGroup::Magic, count: 2 },
+                OccupationSlot::Any { count: 1 },
+            ],
+        }]);
+        let encoded = super::encode(&story).unwrap();
+        assert_eq!(decoder::decode(&encoded).unwrap(), story);
+
+        let json = serde_json::to_value(&story).unwrap();
+        assert_eq!(json["skills"][5]["combat"]["ability"]["target"], "self");
+        assert_eq!(serde_json::from_value::<Story>(json).unwrap(), story);
     }
 
     /// An event's other changes and its time trigger survive a round trip.

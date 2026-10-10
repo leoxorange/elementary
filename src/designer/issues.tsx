@@ -2,7 +2,8 @@
 
 import { t } from "../i18n";
 import { Icon } from "../icons";
-import { skillName } from "../model/names";
+import { occupationName, skillName } from "../model/names";
+import { catalogOf, wealthSkill } from "../model/skills";
 import { findItem, findLocation, findNode, kindTitle } from "../model/story";
 import { isBlank, resolve } from "../model/storyText";
 import type { Story } from "../model/types";
@@ -13,6 +14,8 @@ export function issueMessage(issue: StoryIssue, story: Story, language: string):
   const kind = issue.kind;
   const node = issue.nodeId ? findNode(story, issue.nodeId) : undefined;
   const name = (text: { language: string; value: string }[] | undefined) => (text ? resolve(text, language) : "?");
+  const catalog = catalogOf(story);
+  const skill = (id: string) => skillName(catalog, id, language);
   switch (kind.type) {
     case "noEntrance":
       return t("The story needs an Entrance node.");
@@ -65,13 +68,19 @@ export function issueMessage(issue: StoryIssue, story: Story, language: string):
     case "personalPointsOverspent":
       return t("The hero has spent %lld of %lld personal-interest points.", kind.spent, kind.budget);
     case "notAnOccupationSkill":
-      return t("Occupation points went into %@, which isn’t an occupation skill.", skillName(kind.skillId));
+      return t("Occupation points went into %@, which isn’t an occupation skill.", skill(kind.skillId));
     case "skillTooHigh":
-      return t("%@ is above 99.", skillName(kind.skillId));
-    case "mythosAtCreation":
-      return t("Mythos can’t be bought with skill points at creation.");
+      return t("%@ is above 99.", skill(kind.skillId));
+    case "notAtCreation":
+      return t("%@ can’t be bought with skill points at creation.", skill(kind.skillId));
+    case "notAWeaponSkill":
+      return t("The weapon %@ uses a skill that isn’t a weapon skill, so no one can attack with it.", name(findItem(story, kind.itemId)?.name));
+    case "abilityWithoutDice":
+      return t("The ability %@ has no dice, so it can’t do anything.", skill(kind.skillId));
+    case "occupationUnknownSkill":
+      return t("The occupation %@ offers “%@”, which isn’t on the skill sheet.", occupationName(catalog, kind.occupationId, language), kind.skillId);
     case "creditRatingOutOfRange":
-      return t("Credit Rating should be between %lld and %lld for this occupation.", kind.range[0], kind.range[1]);
+      return t("%@ should be between %lld and %lld for this occupation.", name(wealthSkill(catalog)?.name), kind.range[0], kind.range[1]);
     case "locationNotConnected":
       return t(
         "There’s no road from %@ to %@ on the location map.",

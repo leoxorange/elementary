@@ -1,6 +1,7 @@
 // The pannable, zoomable graph editor. Drag a node's header to move it, drag from an output socket onto another
 // node to wire them, and drag a wire off an input socket to reroute or remove it, as in Blender's node editor.
 
+import { catalogOf } from "../model/skills";
 import { useEffect, useRef, useState } from "react";
 import { contextMenu, isCommand, isTyping, useKeyboard, type MenuEntry } from "../components/ui";
 import { opponent, type Enemy } from "../game/battle";
@@ -539,9 +540,9 @@ function nodeSummary(node: StoryNode, document: StoryDocument): string {
     case "chapterStart":
       return resolve(kind.body, language);
     case "check":
-      return t("%@ · %@ roll", checkTargetName(kind.target), difficultyName(kind.difficulty));
+      return t("%@ · %@ roll", checkTargetName(catalogOf(story), kind.target, language), difficultyName(kind.difficulty));
     case "battle": {
-      const enemy: Enemy | undefined = opponent(story, kind.enemyId);
+      const enemy: Enemy | undefined = opponent(catalogOf(story), story, kind.enemyId);
       return enemy
         ? t("%@ · %lld HP · %lld%% · %@", resolve(enemy.name, language), enemy.hp, enemy.attack.skill, damageLabel(enemy.attack.damage))
         : t("No enemy chosen");

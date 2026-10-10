@@ -58,7 +58,7 @@ export function GameView({ game, onMainMenu, onPlayAgain }: { game: GameState; o
           {section === "journal" && <JournalSection log={game.log} />}
           {section === "pack" && <PackSection hero={game.hero} />}
         </div>
-        {showsCharacterPanel && <CharacterPanel hero={game.hero} />}
+        {showsCharacterPanel && <CharacterPanel hero={game.hero} catalog={game.catalog} />}
       </div>
       <div className="divider" />
       <StatusBar game={game} />

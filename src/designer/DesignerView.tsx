@@ -3,14 +3,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, chooseExportPath, errorMessage } from "../api";
 import { Alert, Confirm, contextMenu, FormRow, FormSection, isCommand, Popover, Segmented, useKeyboard } from "../components/ui";
-import { GameState } from "../game/gameState";
 import { t } from "../i18n";
 import { Icon } from "../icons";
-import { categoryName } from "../model/names";
+import { categoryName, formulaText, groupName } from "../model/names";
+import { SKILL_GROUPS, wealthSkill } from "../model/skills";
 import { hitPoints } from "../model/rules";
 import { entrance, entranceNode, findNode, nodesIn, storyTitle } from "../model/story";
 import { isBlank, resolve } from "../model/storyText";
-import type { Item, NodeType } from "../model/types";
+import type { Item, NodeType, Story, StorySkill } from "../model/types";
 import { MusicPlayer } from "../music";
 import { LanguageMenuButton } from "../screens/game/GameView";
 import { storyLanguageFor, useSettings } from "../settings";
@@ -21,7 +21,7 @@ import { LocationCanvas } from "./LocationCanvas";
 import { NODE_TYPE_DRAG, NodeCanvas, NodeMetrics } from "./NodeCanvas";
 import { isPlaceable, NODE_TYPES, typeColor, typeName, typeSummary, typeSymbol, withAlpha } from "./nodeTypes";
 
-type SidebarTab = "nodes" | "characters" | "monsters" | "items" | "locations" | "events";
+type SidebarTab = "nodes" | "characters" | "monsters" | "items" | "locations" | "events" | "skills" | "occupations";
 
 const TABS: { id: SidebarTab; name: string; symbol: string }[] = [
   { id: "nodes", name: "Nodes", symbol: "square.grid.2x2" },
@@ -30,12 +30,15 @@ const TABS: { id: SidebarTab; name: string; symbol: string }[] = [
   { id: "items", name: "Items", symbol: "shippingbox" },
   { id: "locations", name: "Locations", symbol: "map" },
   { id: "events", name: "Events", symbol: "sparkles" },
+  { id: "skills", name: "Skills", symbol: "list.bullet.clipboard" },
+  { id: "occupations", name: "Occupations", symbol: "briefcase" },
 ];
 
 export function DesignerView({ document, onClose, onPlaytest }: {
   document: StoryDocument;
   onClose: () => void;
-  onPlaytest: (game: GameState) => void;
+  /// Plays the story from the start, beginning with choosing a hero.
+  onPlaytest: (story: Story) => void;
 }) {
   useDocument(document);
   const [tab, setTab] = useState<SidebarTab>("nodes");
@@ -73,6 +76,10 @@ export function DesignerView({ document, onClose, onPlaytest }: {
         return setTab("locations");
       case "event":
         return setTab("events");
+      case "skill":
+        return setTab("skills");
+      case "occupation":
+        return setTab("occupations");
       // Jumping to a node (from a sheet's Used By list, say) brings back the story map.
       case "node":
       case "nodes":
@@ -93,7 +100,7 @@ export function DesignerView({ document, onClose, onPlaytest }: {
     try {
       preview.stop();
       document.saveNow();
-      onPlaytest(GameState.start(document.story, null));
+      onPlaytest(document.story);
     } catch (e) {
       setError({ title: t("Something went wrong"), message: errorMessage(e) });
     }
@@ -390,6 +397,8 @@ function Sidebar({ document, tab, onTab }: { document: StoryDocument; tab: Sideb
       {tab === "items" && <ItemList document={document} />}
       {tab === "locations" && <LocationList document={document} />}
       {tab === "events" && <EventList document={document} />}
+      {tab === "skills" && <SkillList document={document} />}
+      {tab === "occupations" && <OccupationList document={document} />}
     </div>
   );
 }
@@ -611,6 +620,129 @@ function EventList({ document }: { document: StoryDocument }) {
           onDelete={() => document.deleteEvent(event.id)}
         />
       ))}
+    </SheetList>
+  );
+}
+
+/// The skill sheet, grouped. A story starts on the built-in skills; any change makes them the story's own.
+function SkillList({ document }: { document: StoryDocument }) {
+  const language = document.language;
+  const catalog = document.catalog;
+  const [confirmsRestore, setConfirmsRestore] = useState(false);
+  const useLabel = (skill: StorySkill) => {
+    switch (skill.combat.type) {
+      case "none":
+        return groupName(skill.group);
+      case "weapon":
+        return `${groupName(skill.group)} · ${skill.combat.range === "ranged" ? t("Ranged") : t("Melee")}`;
+      case "dodge":
+        return `${groupName(skill.group)} · ${t("Dodge")}`;
+      case "ability":
+        return `${groupName(skill.group)} · ${t("Ability")}`;
+    }
+  };
+  return (
+    <div className="sidebar-scroll">
+      <div className="row" style={{ gap: 6, marginBottom: 4 }}>
+        <button type="button" className="btn btn-glass" style={{ flex: 1, minWidth: 0, padding: "6px 8px" }} onClick={() => document.addSkill("skill")}>
+          <Icon name="plus" size={14} />
+          {t("New Skill")}
+        </button>
+        <button type="button" className="btn btn-glass" style={{ flex: 1, minWidth: 0, padding: "6px 8px" }} onClick={() => document.addSkill("ability")}>
+          <Icon name="flame.fill" size={14} />
+          {t("New Ability")}
+        </button>
+      </div>
+      {SKILL_GROUPS.map((group) => {
+        const skills = catalog.skills.filter((skill) => skill.group === group);
+        if (skills.length === 0) return null;
+        return (
+          <div key={group} className="column" style={{ gap: 2 }}>
+            <span className="caption tertiary" style={{ padding: "8px 6px 2px", fontWeight: 600 }}>
+              {groupName(group)}
+            </span>
+            {skills.map((skill) => (
+              <SheetRow
+                key={skill.id}
+                symbol={skill.symbol || "sparkles"}
+                title={isBlank(skill.name) ? t("Unnamed") : resolve(skill.name, language)}
+                detail={useLabel(skill)}
+                isSelected={document.selectedId("skill") === skill.id}
+                onSelect={() => (document.selection = { type: "skill", id: skill.id })}
+                onDuplicate={() => document.duplicateSkill(skill.id)}
+                onDelete={() => document.deleteSkill(skill.id)}
+              />
+            ))}
+          </div>
+        );
+      })}
+      <span className="caption tertiary" style={{ padding: "6px 4px 0" }}>
+        {catalog.isBuiltIn.skills
+          ? t("This story uses the built-in Call of Cthulhu skills. Change, add, or delete any of them to give the story its own.")
+          : t("This story has its own skills. Checks, weapons, characters, and occupations all draw on this sheet.")}
+      </span>
+      {!catalog.isBuiltIn.skills && (
+        <button type="button" className="btn btn-borderless" style={{ alignSelf: "flex-start" }} onClick={() => setConfirmsRestore(true)}>
+          <Icon name="arrow.counterclockwise" size={13} />
+          {t("Restore Built-in Skills")}
+        </button>
+      )}
+      {confirmsRestore && (
+        <Confirm
+          title={t("Restore the built-in skills?")}
+          message={t("Skills you added or changed are lost. Anything that used a skill that no longer exists is flagged so you can fix it.")}
+          confirmTitle={t("Restore")}
+          onConfirm={() => document.restoreBuiltInSkills()}
+          onDismiss={() => setConfirmsRestore(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function OccupationList({ document }: { document: StoryDocument }) {
+  const language = document.language;
+  const catalog = document.catalog;
+  const wealth = wealthSkill(catalog);
+  const [confirmsRestore, setConfirmsRestore] = useState(false);
+  const sorted = [...catalog.occupations].sort((a, b) => resolve(a.name, language).localeCompare(resolve(b.name, language), language));
+  return (
+    <SheetList
+      addTitle={t("New Occupation")}
+      onAdd={() => document.addOccupation()}
+      empty={
+        catalog.isBuiltIn.occupations
+          ? t("This story uses the built-in Call of Cthulhu occupations. Change, add, or delete any of them to give the story its own.")
+          : t("Players pick one of these when they create a hero; it sets their occupation skill points and skills.")
+      }
+    >
+      {sorted.map((occupation) => (
+        <SheetRow
+          key={occupation.id}
+          symbol={occupation.symbol || "briefcase"}
+          title={isBlank(occupation.name) ? t("Unnamed") : resolve(occupation.name, language)}
+          detail={[formulaText(occupation.points), wealth ? `${occupation.wealth[0]}–${occupation.wealth[1]}` : null].filter(Boolean).join(" · ")}
+          isSelected={document.selectedId("occupation") === occupation.id}
+          onSelect={() => (document.selection = { type: "occupation", id: occupation.id })}
+          onDuplicate={() => document.duplicateOccupation(occupation.id)}
+          onDelete={() => document.deleteOccupation(occupation.id)}
+        />
+      ))}
+      {!catalog.isBuiltIn.occupations && (
+        <button type="button" className="btn btn-borderless" style={{ alignSelf: "flex-start" }} onClick={() => setConfirmsRestore(true)}>
+          <Icon name="arrow.counterclockwise" size={13} />
+          {t("Restore Built-in Occupations")}
+        </button>
+      )}
+      {confirmsRestore && (
+        <Confirm
+          title={t("Restore the built-in occupations?")}
+          message={t("Occupations you added or changed are lost. Characters with an occupation that no longer exists have none.")}
+          confirmTitle={t("Restore")}
+          onConfirm={() => document.restoreBuiltInOccupations()}
+          onDismiss={() => setConfirmsRestore(false)}
+        />
+      )}
     </SheetList>
   );
 }

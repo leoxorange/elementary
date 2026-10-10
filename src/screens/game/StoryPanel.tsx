@@ -3,9 +3,13 @@
 import { useRef, useState } from "react";
 import { isTyping, Popover, SectionLabel, useKeyboard, VitalBar } from "../../components/ui";
 import {
+  canAfford,
+  heroAbilities,
   heroActsFirst,
-  heroFists,
+  heroDodge,
+  heroUnarmed,
   heroWeaponAttacks,
+  type AbilityResult,
   type Attack,
   type AttackResult,
   type BattleAction,
@@ -19,13 +23,13 @@ import {
   type ChoiceBlock,
   type GameState,
 } from "../../game/gameState";
-import { heroSkillValue, heroValue } from "../../game/hero";
+import { heroValue } from "../../game/hero";
 import { t, tIn } from "../../i18n";
 import { Icon } from "../../icons";
-import { checkTargetName, difficultyName, successLevelName } from "../../model/names";
+import { checkTargetName, difficultyName, skillName, successLevelName } from "../../model/names";
 import { damageBonus, damageBonusLabel, damageLabel, isZeroBonus, targetNumber, type DamageBonus } from "../../model/rules";
 import { isBlank, paragraphs, resolve } from "../../model/storyText";
-import type { Chapter, CheckNode, Choice, Outcome, StoryText } from "../../model/types";
+import type { AbilityCost, Chapter, CheckNode, Choice, Outcome, SkillAbility, StoryText } from "../../model/types";
 import { storyLanguageFor, useSettings } from "../../settings";
 import { StoryLogList } from "./GameView";
 
@@ -369,10 +373,11 @@ function APMeter({ current, maximum }: { current: number; maximum: number }) {
 // MARK: Check
 
 function CheckPanel({ game, check }: { game: GameState; check: CheckNode }) {
-  const value = heroValue(game.hero, check.target);
+  const { uiLanguage } = useSettings();
+  const value = heroValue(game.catalog, game.hero, check.target);
   const target = targetNumber(value, check.difficulty);
   const result = game.checkResult;
-  const targetName = checkTargetName(check.target);
+  const targetName = checkTargetName(game.catalog, check.target, uiLanguage);
   return (
     <div className="inset-panel" style={{ marginTop: 28 }}>
       <div className="row" style={{ gap: 14 }}>
@@ -408,13 +413,32 @@ function CheckPanel({ game, check }: { game: GameState; check: CheckNode }) {
 
 // MARK: Battle
 
-/// The actions on offer, in button order: punch, each usable weapon, then dodge.
+/// The actions on offer, in button order: bare hands, each usable weapon, each known ability, then dodge if the
+/// story has a dodge skill.
 function battleActions(game: GameState): BattleAction[] {
+  const catalog = game.catalog;
   return [
     { type: "punch" },
-    ...heroWeaponAttacks(game.hero).map((w) => ({ type: "weapon" as const, itemId: w.item.id })),
-    { type: "dodge" },
+    ...heroWeaponAttacks(catalog, game.hero).map((w) => ({ type: "weapon" as const, itemId: w.item.id })),
+    ...heroAbilities(catalog, game.hero).map((a) => ({ type: "ability" as const, skillId: a.skillId })),
+    ...(heroDodge(catalog, game.hero) !== undefined ? [{ type: "dodge" as const }] : []),
   ];
+}
+
+/// An ability's effect and cost, e.g. “2D6 · all enemies · 4 MP”.
+function abilityLabel(ability: SkillAbility): string {
+  const target = { enemy: t("one enemy"), allEnemies: t("all enemies"), self: t("yourself") }[ability.target];
+  const amount = ability.effect === "heal" ? t("heals %@", damageLabel(ability.amount)) : damageLabel(ability.amount);
+  return [amount, target, costLabel(ability.cost)].filter(Boolean).join(" · ");
+}
+
+function costLabel(cost: AbilityCost): string {
+  const parts: string[] = [];
+  if (cost.mp > 0) parts.push(t("%lld MP", cost.mp));
+  if (cost.hp > 0) parts.push(t("%lld HP", cost.hp));
+  if (cost.stamina > 0) parts.push(t("%lld stamina", cost.stamina));
+  if (cost.sanity > 0) parts.push(t("%lld SAN", cost.sanity));
+  return parts.join(" + ");
 }
 
 /// Damage as dice, e.g. “1D8+2+1D4”.
@@ -432,10 +456,13 @@ function BattlePanel({ game, battle }: { game: GameState; battle: BattleState })
   const { uiLanguage } = useSettings();
   const hero = game.hero;
   const enemyName = resolve(battle.enemy.name, uiLanguage);
+  const catalog = game.catalog;
   const heroBonus = damageBonus(hero.characteristics.strength + hero.characteristics.size);
-  const fists = heroFists(hero);
-  const weapons = heroWeaponAttacks(hero);
-  const heroFirst = heroActsFirst(battle, { type: "punch" }, hero);
+  const fists = heroUnarmed(catalog, hero);
+  const weapons = heroWeaponAttacks(catalog, hero);
+  const abilities = heroAbilities(catalog, hero);
+  const dodge = heroDodge(catalog, hero);
+  const heroFirst = heroActsFirst(catalog, battle, { type: "punch" }, hero);
 
   const actionButton = (action: BattleAction, index: number, symbol: string, title: string, detail: string) => (
     <button
@@ -444,7 +471,7 @@ function BattlePanel({ game, battle }: { game: GameState; battle: BattleState })
       className="battle-action glass glass-interactive"
       disabled={!game.canPerform(action)}
       onClick={() => game.perform(action)}
-      title={`${index}`}
+      title={`${index} · ${title} · ${detail}`}
     >
       <Icon name={symbol} size={20} />
       <span className="name">{title}</span>
@@ -490,7 +517,13 @@ function BattlePanel({ game, battle }: { game: GameState; battle: BattleState })
               : t("%@ acts first (DEX %lld vs %lld).", enemyName, battle.enemy.dexterity, hero.characteristics.dexterity)}
           </div>
           <div className="battle-actions">
-            {actionButton({ type: "punch" }, 1, "hand.raised.fingers.spread", t("Punch"), `${fists.skill}% · ${attackDamageLabel(fists, heroBonus)}`)}
+            {actionButton(
+              { type: "punch" },
+              1,
+              "hand.raised.fingers.spread",
+              fists.skillId ? skillName(catalog, fists.skillId, uiLanguage) : t("Punch"),
+              `${fists.skill}% · ${attackDamageLabel(fists, heroBonus)}`,
+            )}
             {weapons.map((weapon, offset) => {
               const line = `${weapon.attack.skill}% · ${attackDamageLabel(weapon.attack, heroBonus)}`;
               return actionButton(
@@ -498,10 +531,22 @@ function BattlePanel({ game, battle }: { game: GameState; battle: BattleState })
                 offset + 2,
                 weapon.item.symbol || "wand.and.sparkles",
                 resolve(weapon.item.name, uiLanguage),
-                weapon.attack.isFirearm ? t("%@ · fires first", line) : line,
+                weapon.attack.ranged ? t("%@ · fires first", line) : line,
               );
             })}
-            {actionButton({ type: "dodge" }, weapons.length + 2, "figure.walk.motion", t("Dodge"), t("%lld%% · wins ties", heroSkillValue(hero, "dodge")))}
+            {abilities.map((known, offset) =>
+              actionButton(
+                { type: "ability", skillId: known.skillId },
+                weapons.length + offset + 2,
+                known.symbol || "sparkles",
+                resolve(known.name, uiLanguage),
+                canAfford(hero, known.ability.cost)
+                  ? `${known.value}% · ${abilityLabel(known.ability)}`
+                  : t("Can’t pay %@", costLabel(known.ability.cost)),
+              ),
+            )}
+            {dodge !== undefined &&
+              actionButton({ type: "dodge" }, weapons.length + abilities.length + 2, "figure.walk.motion", t("Dodge"), t("%lld%% · wins ties", dodge))}
           </div>
         </>
       )}
@@ -526,6 +571,8 @@ function eventText(event: BattleEvent, enemyName: string, language: string): str
   switch (kind.type) {
     case "heroDodging":
       return t("You stay light on your feet, ready to dodge.");
+    case "ability":
+      return abilityText(resolve(kind.name, language), kind.roll, kind.skill, kind.result, enemyName);
     case "attack":
       return kind.attacker === "hero"
         ? heroAttackText(weaponName(kind.weapon, language), kind.roll, kind.skill, kind.result, enemyName)
@@ -543,6 +590,21 @@ function eventText(event: BattleEvent, enemyName: string, language: string): str
       return t("%@ falls.", enemyName);
     case "defeat":
       return t("You fall.");
+  }
+}
+
+function abilityText(ability: string, roll: number, skill: number, result: AbilityResult, enemyName: string): string {
+  switch (result.type) {
+    case "hit":
+      return result.extreme
+        ? t("%@ (%lld vs %lld) strikes with full force for %lld damage!", ability, roll, skill, result.damage)
+        : t("%@ (%lld vs %lld) hits for %lld damage.", ability, roll, skill, result.damage);
+    case "healed":
+      return t("%@ (%lld vs %lld) restores %lld HP.", ability, roll, skill, result.amount);
+    case "failed":
+      return t("%@ fails (%lld vs %lld).", ability, roll, skill);
+    case "dodged":
+      return t("%@ evades your %@ (%lld vs %lld).", enemyName, ability, result.roll, result.skill);
   }
 }
 

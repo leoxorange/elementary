@@ -1,5 +1,5 @@
 import { hitPoints, magicPoints, moveRate as characteristicsMoveRate, startingSanity } from "../model/rules";
-import { skillValue, valueForTarget } from "../model/skills";
+import { skillValue, valueForTarget, type SkillCatalog } from "../model/skills";
 import { entrance, heroCharacter } from "../model/story";
 import type {
   Characteristics,
@@ -80,10 +80,9 @@ export function makeHero(character: StoryCharacter, items: Item[], quest: Quest)
   };
 }
 
-/// The hero as they begin play, with copies of their starting items.
-export function storyHero(story: Story): Hero | undefined {
+/// The hero as they begin play, with copies of their starting items: the story's own hero, or one the player made.
+export function storyHero(story: Story, character = heroCharacter(story)): Hero | undefined {
   const entranceNode = entrance(story);
-  const character = heroCharacter(story);
   if (!entranceNode || !character) return undefined;
   return makeHero(character, story.items, entranceNode.quest);
 }
@@ -93,13 +92,13 @@ export function heroMoveRate(hero: Hero): number {
 }
 
 /// A skill's value: the best entry for it, or its base value if the hero has none.
-export function heroSkillValue(hero: Hero, skillId: string): number {
-  return skillValue(hero.skills, hero.characteristics, skillId);
+export function heroSkillValue(catalog: SkillCatalog, hero: Hero, skillId: string): number {
+  return skillValue(catalog, hero.skills, hero.characteristics, skillId);
 }
 
 /// The value a check rolls against.
-export function heroValue(hero: Hero, target: CheckTarget): number {
-  return valueForTarget(hero.skills, hero.characteristics, target);
+export function heroValue(catalog: SkillCatalog, hero: Hero, target: CheckTarget): number {
+  return valueForTarget(catalog, hero.skills, hero.characteristics, target);
 }
 
 /// Armor: damage soaked from every hit by carried armor and trinkets.

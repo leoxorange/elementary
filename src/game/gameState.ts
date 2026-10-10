@@ -26,13 +26,15 @@ import type {
   Item,
   SceneSetting,
   Story,
+  StoryCharacter,
   StoryNode,
   StorySource,
   StoryText,
 } from "../model/types";
 import { Port } from "../model/types";
 import { isPlayable } from "../model/validator";
-import { heroAttack, newBattle, opponent, performRound, type BattleAction, type BattleState } from "./battle";
+import { canTake, newBattle, opponent, performRound, upgradeSavedBattle, type BattleAction, type BattleState } from "./battle";
+import { catalogOf, type SkillCatalog } from "../model/skills";
 import { carriedWeight, heroValue, storyHero, type Hero } from "./hero";
 
 /// Why a story can't be started.
@@ -152,11 +154,11 @@ export class GameState {
     this.phaseIndex = phaseIndex;
   }
 
-  /// Starts a new game at the story's entrance.
-  static start(story: Story, source: StorySource | null): GameState {
+  /// Starts a new game at the story's entrance, as the story's hero or as `character`, one the player created.
+  static start(story: Story, source: StorySource | null, character?: StoryCharacter): GameState {
     const node = entranceNode(story);
     const start = entrance(story);
-    const hero = storyHero(story);
+    const hero = storyHero(story, character);
     if (!isPlayable(story) || !node || !start || !hero) {
       throw new GameError(t("This story has errors. Open it in the Story Designer to fix them."));
     }
@@ -173,6 +175,7 @@ export class GameState {
     const game = new GameState(story, saved.source, saved.hero, saved.nodeId, saved.day, saved.phaseIndex % PHASE_COUNT);
     game.setting = saved.setting;
     game.battle = saved.battle;
+    if (game.battle) upgradeSavedBattle(game.battle);
     game.checkResult = saved.checkResult;
     game.musicTrackId = saved.musicTrackId;
     game.visitedLocations = saved.visitedLocations;
@@ -194,6 +197,11 @@ export class GameState {
   private changed() {
     this.version++;
     for (const listener of this.listeners) listener();
+  }
+
+  /// The story's skills and occupations.
+  get catalog(): SkillCatalog {
+    return catalogOf(this.story);
   }
 
   get autosaves(): boolean {
@@ -323,7 +331,7 @@ export class GameState {
       target: kind.target,
       difficulty: kind.difficulty,
       roll: randomInt(1, 100),
-      value: heroValue(this.hero, kind.target),
+      value: heroValue(this.catalog, this.hero, kind.target),
     };
     this.save();
     this.changed();
@@ -332,7 +340,7 @@ export class GameState {
   perform(action: BattleAction) {
     const battle = this.battle;
     if (!battle || battle.outcome) return;
-    performRound(battle, action, this.hero);
+    performRound(this.catalog, battle, action, this.hero);
     if (battle.outcome === "victory") {
       this.apply({ ...zeroEffect(), xp: battle.enemy.xpReward, gold: battle.enemy.goldReward });
     }
@@ -342,7 +350,7 @@ export class GameState {
 
   canPerform(action: BattleAction): boolean {
     if (this.battle?.outcome) return false;
-    return action.type === "dodge" || heroAttack(this.hero, action) !== undefined;
+    return canTake(this.catalog, this.hero, action);
   }
 
   // MARK: Private
@@ -409,7 +417,7 @@ export class GameState {
     }
 
     if (next.kind.type === "battle") {
-      const enemy = opponent(this.story, next.kind.enemyId);
+      const enemy = opponent(this.catalog, this.story, next.kind.enemyId);
       if (enemy) this.battle = newBattle(enemy);
     }
     this.save();

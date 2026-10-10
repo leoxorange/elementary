@@ -7,14 +7,14 @@ import { t } from "../../i18n";
 import { Icon } from "../../icons";
 import { characteristicName, occupationName, skillName } from "../../model/names";
 import { ABBREVIATIONS, build, CHARACTERISTICS, damageBonus, damageBonusLabel, div } from "../../model/rules";
-import { allowsOccupationPoints, baseValue, entryValue, occupation, SKILLS } from "../../model/skills";
+import { allowsOccupationPoints, baseValue, entryValue, type SkillCatalog } from "../../model/skills";
 import { isBlank, resolve } from "../../model/storyText";
 import type { Item } from "../../model/types";
 import { useSettings } from "../../settings";
 
-export function CharacterPanel({ hero }: { hero: Hero }) {
+export function CharacterPanel({ hero, catalog }: { hero: Hero; catalog: SkillCatalog }) {
   const { uiLanguage } = useSettings();
-  const job = occupation(hero.occupationId);
+  const job = catalog.occupation(hero.occupationId);
   const name = resolve(hero.name, uiLanguage);
 
   return (
@@ -35,7 +35,7 @@ export function CharacterPanel({ hero }: { hero: Hero }) {
           </span>
           <span className="callout secondary" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {[
-              job ? occupationName(job.id) : !isBlank(hero.calling) ? resolve(hero.calling, uiLanguage) : null,
+              job ? occupationName(catalog, job.id, uiLanguage) : !isBlank(hero.calling) ? resolve(hero.calling, uiLanguage) : null,
               !isBlank(hero.lineage) ? resolve(hero.lineage, uiLanguage) : null,
               t("Age %lld", hero.age),
             ]
@@ -75,7 +75,7 @@ export function CharacterPanel({ hero }: { hero: Hero }) {
         <DerivedChip title={t("Build")} value={String(build(hero.characteristics))} />
         <DerivedChip title={t("Damage bonus")} value={damageBonusLabel(damageBonus(hero.characteristics.strength + hero.characteristics.size))} />
       </div>
-      <Skills hero={hero} />
+      <Skills hero={hero} catalog={catalog} />
 
       <div className="column" style={{ gap: 12 }}>
         <div className="row">
@@ -146,29 +146,29 @@ interface SkillRowData {
 
 /// The hero's skills with their half and fifth values, like a character sheet. By default only the skills the
 /// hero has invested in are listed; the toggle shows every common skill at its base too.
-function Skills({ hero }: { hero: Hero }) {
+function Skills({ hero, catalog }: { hero: Hero; catalog: SkillCatalog }) {
   const [showsAll, setShowsAll] = useState(false);
   const { uiLanguage } = useSettings();
-  const job = occupation(hero.occupationId);
+  const job = catalog.occupation(hero.occupationId);
 
   const rows: SkillRowData[] = hero.skills.map((entry) => {
-    const base = skillName(entry.skillId);
+    const base = skillName(catalog, entry.skillId, uiLanguage);
     return {
       id: entry.id,
       skillId: entry.skillId,
       name: isBlank(entry.specialty) ? base : `${base} (${resolve(entry.specialty, uiLanguage)})`,
-      value: entryValue(entry, hero.characteristics),
+      value: entryValue(catalog, entry, hero.characteristics),
       isTrained: entry.occupationPoints + entry.personalPoints > 0,
     };
   });
   if (showsAll) {
     const listed = new Set(hero.skills.map((s) => s.skillId));
-    for (const definition of SKILLS) {
+    for (const definition of catalog.skills) {
       if (definition.isUncommon || listed.has(definition.id)) continue;
       rows.push({
         id: "base-" + definition.id,
         skillId: definition.id,
-        name: skillName(definition.id),
+        name: skillName(catalog, definition.id, uiLanguage),
         value: baseValue(definition.base, hero.characteristics),
         isTrained: false,
       });
@@ -187,7 +187,7 @@ function Skills({ hero }: { hero: Hero }) {
       </div>
       <div className="column">
         {rows.map((row) => {
-          const isOccupationSkill = (job && allowsOccupationPoints(job, row.skillId)) || (!job && row.isTrained);
+          const isOccupationSkill = (job && allowsOccupationPoints(catalog, job, row.skillId)) || (!job && row.isTrained);
           return (
             <div key={row.id} className="skill-row">
               <span style={{ width: 10, display: "inline-flex", color: "var(--accent)", opacity: row.isTrained ? 1 : 0.4 }}>

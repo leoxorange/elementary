@@ -141,6 +141,8 @@ fn decode_story(chunks: &[Chunk]) -> Result<Story> {
     let mut legacy_weapons: HashSet<String> = HashSet::new();
     let mut locations: Option<Vec<StoryLocation>> = None;
     let mut events: Option<Vec<StoryEvent>> = None;
+    let mut skills: Option<Vec<StorySkill>> = None;
+    let mut occupations: Option<Vec<StoryOccupation>> = None;
     let mut routes: Option<Vec<LocationRoute>> = None;
     let mut tracks: Option<Vec<MusicTrack>> = None;
     let mut nodes: Option<Vec<StoryNode>> = None;
@@ -235,6 +237,14 @@ fn decode_story(chunks: &[Chunk]) -> Result<Story> {
                     })
                 })?);
             }
+            t if t == tag::SKILLS => {
+                ensure_unique(&skills, t)?;
+                skills = Some(read_array(r, |r| read_skill(&mut read_record(r)?, &context))?);
+            }
+            t if t == tag::OCCUPATIONS => {
+                ensure_unique(&occupations, t)?;
+                occupations = Some(read_array(r, |r| read_occupation(&mut read_record(r)?, &context))?);
+            }
             t if t == tag::TRACKS => {
                 ensure_unique(&tracks, t)?;
                 tracks = Some(read_array(r, |r| {
@@ -287,6 +297,8 @@ fn decode_story(chunks: &[Chunk]) -> Result<Story> {
         events: events.unwrap_or_default(),
         routes: routes.unwrap_or_default(),
         tracks: tracks.unwrap_or_default(),
+        skills,
+        occupations,
     };
     migrate_settings(legacy_settings, &mut story);
     migrate_legacy_weapons(&legacy_weapons, &mut story);
@@ -587,6 +599,88 @@ fn read_damage(reader: &mut ByteReader) -> Result<DamageRoll> {
         return malformed("A damage roll is out of range.");
     }
     Ok(damage)
+}
+
+fn read_characteristic(reader: &mut ByteReader) -> Result<Characteristic> {
+    Characteristic::from_u8(reader.read_u8()?).ok_or_else(|| StoryFileError::Malformed("A characteristic is unknown.".into()))
+}
+
+fn read_group(reader: &mut ByteReader) -> Result<SkillGroup> {
+    SkillGroup::from_u8(reader.read_u8()?).ok_or_else(|| StoryFileError::Malformed("A skill group is unknown.".into()))
+}
+
+fn read_skill(reader: &mut ByteReader, context: &Context) -> Result<StorySkill> {
+    let id = context.string(reader)?;
+    let name = context.text(reader)?;
+    let detail = context.text(reader)?;
+    let symbol = context.string(reader)?;
+    let group = read_group(reader)?;
+    let base = match reader.read_u8()? {
+        0 => SkillBase::Fixed { value: reader.read_int()? },
+        1 => SkillBase::Characteristic { characteristic: read_characteristic(reader)?, divisor: reader.read_int()? },
+        _ => return malformed(format!("Skill “{id}” has an unknown base value.")),
+    };
+    let takes_specialty = reader.read_bool()?;
+    let is_uncommon = reader.read_bool()?;
+    let at_creation = reader.read_bool()?;
+    let is_wealth = reader.read_bool()?;
+    let combat = match reader.read_u8()? {
+        0 => SkillCombat::None,
+        1 => {
+            let range = match reader.read_u8()? {
+                0 => WeaponRange::Melee,
+                1 => WeaponRange::Ranged,
+                _ => return malformed(format!("Skill “{id}” has an unknown weapon range.")),
+            };
+            let unarmed = if reader.read_bool()? { Some(read_damage(reader)?) } else { None };
+            SkillCombat::Weapon { range, unarmed }
+        }
+        2 => SkillCombat::Dodge,
+        3 => {
+            let effect = match reader.read_u8()? {
+                0 => AbilityEffect::Damage,
+                1 => AbilityEffect::Heal,
+                _ => return malformed(format!("Skill “{id}” has an unknown ability effect.")),
+            };
+            let amount = read_damage(reader)?;
+            let adds_damage_bonus = reader.read_bool()?;
+            let pierces_armor = reader.read_bool()?;
+            let dodgeable = reader.read_bool()?;
+            let target = match reader.read_u8()? {
+                0 => AbilityTarget::Enemy,
+                1 => AbilityTarget::AllEnemies,
+                2 => AbilityTarget::User,
+                _ => return malformed(format!("Skill “{id}” has an unknown ability target.")),
+            };
+            let cost =
+                AbilityCost { mp: reader.read_int()?, hp: reader.read_int()?, stamina: reader.read_int()?, sanity: reader.read_int()? };
+            SkillCombat::Ability { ability: SkillAbility { effect, amount, adds_damage_bonus, pierces_armor, dodgeable, target, cost } }
+        }
+        _ => return malformed(format!("Skill “{id}” has an unknown combat use.")),
+    };
+    Ok(StorySkill { id, name, detail, symbol, group, base, takes_specialty, is_uncommon, at_creation, is_wealth, combat })
+}
+
+fn read_occupation(reader: &mut ByteReader, context: &Context) -> Result<StoryOccupation> {
+    let id = context.string(reader)?;
+    let name = context.text(reader)?;
+    let detail = context.text(reader)?;
+    let symbol = context.string(reader)?;
+    let wealth = [reader.read_int()?, reader.read_int()?];
+    let points = read_array(reader, |r| {
+        let multiplier = r.read_int()?;
+        Ok(PointTerm { characteristics: read_array(r, read_characteristic)?, multiplier })
+    })?;
+    let slots = read_array(reader, |r| {
+        Ok(match r.read_u8()? {
+            0 => OccupationSlot::Skill { skill_id: context.string(r)?, specialty: context.text(r)? },
+            1 => OccupationSlot::OneOf { skill_ids: read_array(r, |r| context.string(r))? },
+            2 => OccupationSlot::Group { group: read_group(r)?, count: r.read_int()? },
+            3 => OccupationSlot::Any { count: r.read_int()? },
+            _ => return malformed(format!("Occupation “{id}” has an unknown kind of skill slot.")),
+        })
+    })?;
+    Ok(StoryOccupation { id, name, detail, symbol, wealth, points, slots })
 }
 
 fn read_monster(reader: &mut ByteReader, context: &Context) -> Result<StoryMonster> {

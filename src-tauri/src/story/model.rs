@@ -61,6 +61,13 @@ pub struct Story {
     pub events: Vec<StoryEvent>,
     pub routes: Vec<LocationRoute>,
     pub tracks: Vec<MusicTrack>,
+    /// The skill sheet, or `None` for the built-in catalog the frontend supplies. Only stories that customize their
+    /// skills store them, so the others stay byte-for-byte what they were.
+    #[serde(default)]
+    pub skills: Option<Vec<StorySkill>>,
+    /// The occupation sheet, or `None` for the built-in catalog.
+    #[serde(default)]
+    pub occupations: Option<Vec<StoryOccupation>>,
 }
 
 impl Story {
@@ -636,6 +643,153 @@ impl LocationRoute {
     pub fn new(a: String, b: String) -> Self {
         if a <= b { Self { first: a, second: b } } else { Self { first: b, second: a } }
     }
+}
+
+// MARK: Skills and occupations
+
+/// How skills are grouped on character sheets, and what an occupation's “N skills from a group” slots draw from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillGroup {
+    Combat,
+    Interpersonal,
+    Knowledge,
+    Perception,
+    Physical,
+    Technical,
+    Magic,
+    Other,
+}
+
+impl SkillGroup {
+    pub const ALL: [Self; 8] =
+        [Self::Combat, Self::Interpersonal, Self::Knowledge, Self::Perception, Self::Physical, Self::Technical, Self::Magic, Self::Other];
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Self::ALL.get(value as usize).copied()
+    }
+}
+
+/// A skill's value before any points: a fixed number, or a characteristic divided by `divisor`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SkillBase {
+    Fixed { value: i64 },
+    Characteristic { characteristic: Characteristic, divisor: i64 },
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WeaponRange {
+    Melee,
+    Ranged,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AbilityEffect {
+    Damage,
+    Heal,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AbilityTarget {
+    Enemy,
+    AllEnemies,
+    #[serde(rename = "self")]
+    User,
+}
+
+/// What a resource-spending ability costs each time it's used.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AbilityCost {
+    pub mp: i64,
+    pub hp: i64,
+    pub stamina: i64,
+    pub sanity: i64,
+}
+
+/// An action a skill grants on its own, such as a spell or a technique: roll the skill, pay the cost, apply the effect.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillAbility {
+    pub effect: AbilityEffect,
+    pub amount: DamageRoll,
+    pub adds_damage_bonus: bool,
+    pub pierces_armor: bool,
+    pub dodgeable: bool,
+    pub target: AbilityTarget,
+    pub cost: AbilityCost,
+}
+
+/// What a skill does in a fight.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SkillCombat {
+    /// Only rolled by checks.
+    None,
+    /// Weapons use it. `unarmed` is the damage when attacking with it bare-handed, if that's possible.
+    Weapon { range: WeaponRange, unarmed: Option<DamageRoll> },
+    /// Rolled to get out of the way of attacks.
+    Dodge,
+    Ability { ability: SkillAbility },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorySkill {
+    pub id: String,
+    pub name: StoryText,
+    pub detail: StoryText,
+    pub symbol: String,
+    pub group: SkillGroup,
+    pub base: SkillBase,
+    pub takes_specialty: bool,
+    pub is_uncommon: bool,
+    /// Whether points can go into it when a character is created.
+    pub at_creation: bool,
+    /// Occupations set the range this skill must stay in, as with Credit Rating.
+    pub is_wealth: bool,
+    pub combat: SkillCombat,
+}
+
+/// One term of an occupation's skill point formula: the best of `characteristics`, times `multiplier`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PointTerm {
+    pub characteristics: Vec<Characteristic>,
+    pub multiplier: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum OccupationSlot {
+    Skill {
+        #[serde(rename = "skillId")]
+        skill_id: String,
+        specialty: StoryText,
+    },
+    OneOf {
+        #[serde(rename = "skillIds")]
+        skill_ids: Vec<String>,
+    },
+    Group { group: SkillGroup, count: i64 },
+    Any { count: i64 },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoryOccupation {
+    pub id: String,
+    pub name: StoryText,
+    pub detail: StoryText,
+    pub symbol: String,
+    /// The range the wealth skill (Credit Rating) must stay within.
+    pub wealth: [i64; 2],
+    pub points: Vec<PointTerm>,
+    pub slots: Vec<OccupationSlot>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

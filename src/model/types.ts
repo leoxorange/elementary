@@ -34,6 +34,99 @@ export interface Story {
   /// Two-way roads between locations on the location map.
   routes: LocationRoute[];
   tracks: MusicTrack[];
+  /// The skill sheet, or `null` for the built-in catalog. A story only stores its own once it changes them.
+  skills: StorySkill[] | null;
+  /// The occupation sheet, or `null` for the built-in catalog.
+  occupations: StoryOccupation[] | null;
+}
+
+// MARK: Skills and occupations
+
+/// How skills are grouped on character sheets, and what an occupation's “N skills from a group” slots draw from.
+export type SkillGroup = "combat" | "interpersonal" | "knowledge" | "perception" | "physical" | "technical" | "magic" | "other";
+
+/// A skill's value before any points: a fixed number, or a characteristic divided by `divisor` (Dodge is DEX ÷ 2).
+export type SkillBase = { type: "fixed"; value: number } | { type: "characteristic"; characteristic: Characteristic; divisor: number };
+
+export type WeaponRange = "melee" | "ranged";
+
+/// What one use of an ability costs.
+export interface AbilityCost {
+  mp: number;
+  hp: number;
+  stamina: number;
+  sanity: number;
+}
+
+/// An action a skill grants by itself, like a spell: pay the cost, roll the skill, and on a success apply the effect.
+export interface SkillAbility {
+  effect: "damage" | "heal";
+  /// Dice for the damage dealt or health restored.
+  amount: DamageRoll;
+  addsDamageBonus: boolean;
+  /// Ignores armor, as fire or a curse would.
+  piercesArmor: boolean;
+  /// Whether the target can roll to dodge it.
+  dodgeable: boolean;
+  /// Who it affects. With one opponent, “all enemies” is that opponent.
+  target: "enemy" | "allEnemies" | "self";
+  cost: AbilityCost;
+}
+
+/// What a skill does in a fight.
+export type SkillCombat =
+  /// Only rolled by checks.
+  | { type: "none" }
+  /// Weapons use it. Melee attacks can be dodged or fought back; ranged ones can't, and act first. `unarmed` is the
+  /// damage of attacking with it bare-handed, when that's possible (Fighting (Brawl)).
+  | { type: "weapon"; range: WeaponRange; unarmed: DamageRoll | null }
+  /// Rolled to get out of the way of attacks.
+  | { type: "dodge" }
+  | { type: "ability"; ability: SkillAbility };
+
+/// An entry on a story's skill sheet.
+export interface StorySkill {
+  id: string;
+  name: StoryText;
+  detail: StoryText;
+  symbol: string;
+  group: SkillGroup;
+  base: SkillBase;
+  /// Taken with a specialty, such as Science (Biology).
+  takesSpecialty: boolean;
+  /// Only listed on a character sheet once the character has it.
+  isUncommon: boolean;
+  /// Whether points can go into it at character creation (Cthulhu Mythos can't).
+  atCreation: boolean;
+  /// Occupations set the range this skill must stay within, as with Credit Rating.
+  isWealth: boolean;
+  combat: SkillCombat;
+}
+
+/// One term of an occupation's skill point formula: the best of `characteristics`, times `multiplier`.
+export interface PointTerm {
+  characteristics: Characteristic[];
+  multiplier: number;
+}
+
+/// One entry in an occupation's skill list.
+export type OccupationSlot =
+  | { type: "skill"; skillId: string; specialty: StoryText }
+  | { type: "oneOf"; skillIds: string[] }
+  | { type: "group"; group: SkillGroup; count: number }
+  | { type: "any"; count: number };
+
+/// An entry on a story's occupation sheet.
+export interface StoryOccupation {
+  id: string;
+  name: StoryText;
+  detail: StoryText;
+  symbol: string;
+  /// The range the wealth skill (Credit Rating) must stay within.
+  wealth: [number, number];
+  /// The occupation skill point formula, e.g. EDU × 2 + the better of DEX or STR × 2.
+  points: PointTerm[];
+  slots: OccupationSlot[];
 }
 
 /// A section of the story with its own node map.
