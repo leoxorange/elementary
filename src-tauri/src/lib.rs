@@ -11,7 +11,7 @@ use story::format::StoryFileError;
 use story::model::{MusicTrack, Story};
 use story::package::{self, PackageError, TrackStore};
 use tauri::ipc::Response;
-use tauri::{AppHandle, Manager, State};
+use tauri::{App, AppHandle, Manager, State, WebviewWindowBuilder};
 
 struct AppState {
     storage: Storage,
@@ -150,13 +150,31 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Where the library, the played copies, and the autosave live. The portable build keeps them in a `data` folder
+/// next to the executable, so the whole app can be moved or carried on a USB drive.
+fn data_dir(app: &App) -> tauri::Result<PathBuf> {
+    if cfg!(feature = "portable") {
+        let exe = std::env::current_exe()?;
+        Ok(exe.parent().expect("the executable is in a folder").join("data"))
+    } else {
+        app.path().app_data_dir()
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let data = app.path().app_data_dir()?;
+            let data = data_dir(app)?;
             let resources = app.path().resource_dir()?;
+            // The main window is created here rather than from the config, so the portable build can point the
+            // webview's own storage (where the frontend keeps its settings) into its data folder.
+            let mut window = WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?;
+            if cfg!(feature = "portable") {
+                window = window.data_directory(data.join("WebView"));
+            }
+            window.build()?;
             app.manage(AppState { storage: Storage::new(data, resources), tracks: TrackStore::default() });
             Ok(())
         })

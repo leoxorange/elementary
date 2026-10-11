@@ -9,7 +9,12 @@ It's a port of the SwiftUI app in `../RP/RolePlayer`, and it reads and writes th
 npm install
 npm run tauri dev      # develop
 npm run tauri build    # package the app
+npm run portable       # portable Windows build in portable/, no installer
 ```
+
+The portable build is a folder (and a ZIP of it) with the executable, `WebView2Loader.dll`, and the built-in
+stories. It's built with the `portable` Cargo feature, so it keeps saves, the designer's library, and the settings in
+a `data` folder next to the executable instead of the app data directory.
 
 ## Layout
 
